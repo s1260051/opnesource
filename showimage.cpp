@@ -1,0 +1,18873 @@
+//
+// Copyright (c) 2021 The University of Aizu
+// Open source under the BSD License.
+//
+
+#include "showimage.h"
+#include "mainwindow.h"
+#include "pixcelgraph.h"
+#include <FITS.h>
+#include <calibrationgraph.h>
+#include <controlgraphpanel.h>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <math.h>
+
+#include <QDir>
+
+#define Width 384
+#define Height 256
+
+using namespace std;
+using namespace CCfits;
+
+ShowImage::ShowImage(QWidget *parent) : QOpenGLWidget(parent) {
+  MAX_V = 0;
+  MIN_V = 100000;
+  judge = true;
+  renderunitflag = true;
+
+  colorselect = 0;
+
+  h_planck = 6.62606957e-34;
+  kB = 1.3806488e-23;
+  c_speed = 299792458;
+  c1 = 2 * M_PI * h_planck * pow(c_speed, 2);
+  c2 = (h_planck * c_speed) / kB;
+  SIGMA = 5.670373e-8;
+  loadFilter();
+}
+
+ShowImage::~ShowImage() {}
+
+void ShowImage::initializeGL() {
+  glClearColor(0, 0, 0, 0);
+  glOrtho(0.0, 1.0, 0.0, 1.0, -1.0, 1.0);
+}
+
+void ShowImage::resizeGL(int width, int height) {
+  glViewport(0, 0, width, height);
+  glLoadIdentity();
+
+  glOrtho(-10, Width + 100, Height + 10, -10, -1, 1);
+}
+
+void ShowImage::paintGL() {
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glEnable(GL_CULL_FACE);
+
+  render();
+}
+
+void ShowImage::render() {
+
+  double T = MAX_V - MIN_V;
+
+  if (judge == true) {
+
+    glBegin(GL_POINTS);
+
+    for (int i = 0; i < 256; i++) {
+      for (int j = 0; j < 15; j++) {
+        glColor3dv(colorTable[255 - i]);
+        glVertex2d(j + 395, i);
+      }
+    }
+
+    glEnd();
+
+    QPainter num(this);
+    num.setPen(Qt::cyan);
+    num.setFont(QFont("Arial", 15));
+
+    if (renderunitflag == true) {
+      num.drawText(470, 53, "DN");
+    } else {
+      num.drawText(470, 53, "K");
+    }
+
+    num.drawText(427, 24, QString::number(MAX_V));
+    num.drawText(427, 85, QString::number((int)(MAX_V - T / 4)));
+    num.drawText(427, 146, QString::number((int)(MAX_V - T / 2)));
+    num.drawText(427, 206, QString::number((int)(MAX_V - T * 3 / 4)));
+    num.drawText(427, 265, QString::number(MIN_V));
+    num.end();
+  }
+
+  glBegin(GL_POINTS);
+
+  pixelDraw(T);
+  glEnd();
+}
+
+void ShowImage::mousePressEvent(QMouseEvent *event) {
+
+  if (event->buttons() & Qt::LeftButton) {
+
+    if (event->x() >= 10 && event->x() <= 394 && event->y() <= 266 &&
+        event->y() >= 10) {
+      setValueX(QString::number(event->x() - 10));
+      setValueY(QString::number(event->y() - 10));
+      setValuePixel(QString::number(image[event->y() - 10][event->x() - 10]));
+    }
+  }
+
+  if (event->buttons() & Qt::RightButton) {
+
+    if (judge != true)
+      judge = true;
+    else if (judge == true)
+      judge = false;
+    this->update();
+  }
+}
+
+void ShowImage::loadFileName(QString name) {
+
+  MAX_V = 0;
+  MIN_V = 100000;
+  filename = name;
+
+  loadBuffer();
+
+  makeColorTable();
+
+  this->update();
+}
+
+string ShowImage::ReplaceString(string String1, std::string String2,
+                                std::string String3) {
+  std::string::size_type Pos(String1.find(String2));
+
+  while (Pos != std::string::npos) {
+    String1.replace(Pos, String2.length(), String3);
+    Pos = String1.find(String2, Pos + String3.length());
+  }
+
+  return String1;
+}
+
+void ShowImage::loadBuffer() {
+  fstream ifs;
+  ifs.open(&filename.toStdString()[0], ios::in | ios::binary);
+
+  QFileInfo fileinfo;
+  fileinfo.setFile(filename);
+  QString ext = fileinfo.suffix();
+  ext = ext.toLower();
+
+  if (ext == "fit" || ext == "fits" || ext == "fts") {
+    fitsflag = 1;
+    valarray<long> contents;
+    auto_ptr<FITS> pInfile(0);
+    try {
+      pInfile.reset(new FITS(filename.toStdString().c_str(), Read, true));
+      PHDU &fitsImage = pInfile->pHDU();
+      fitsImage.read(contents);
+      fitsImage.readAllKeys();
+
+      try {
+        pInfile->pHDU().readKey<string>("ORIGIN", origin);
+        pInfile->pHDU().readKey<string>("DATE", date);
+        pInfile->pHDU().readKey<string>("DATE-BEG", date_beg);
+        pInfile->pHDU().readKey<string>("DATE-OBS", date_obs);
+        pInfile->pHDU().readKey<string>("DATE-END", date_end);
+        pInfile->pHDU().readKey<string>("TELESCOP", telescop);
+        pInfile->pHDU().readKey<string>("INSTRUME", instrume);
+        pInfile->pHDU().readKey<string>("OBJECT", object);
+        pInfile->pHDU().readKey<string>("BUNIT", bunit);
+        pInfile->pHDU().readKey<double>("XPOSURE", xposure);
+        pInfile->pHDU().readKey<double>("IFOV", ifov);
+        pInfile->pHDU().readKey<string>("FILTER", filter);
+        pInfile->pHDU().readKey<string>("OPRGNAME", oprgname);
+        pInfile->pHDU().readKey<string>("OPRGNO", oprgno);
+        pInfile->pHDU().readKey<double>("ROI_LLX", roi_llx);
+        pInfile->pHDU().readKey<double>("ROI_LLY", roi_lly);
+        pInfile->pHDU().readKey<double>("ROI_URX", roi_urx);
+        pInfile->pHDU().readKey<double>("ROI_URY", roi_ury);
+        pInfile->pHDU().readKey<double>("DATAMAX", datamax);
+        pInfile->pHDU().readKey<double>("DATAMIN", datamin);
+        pInfile->pHDU().readKey<double>("MEAN", mean);
+        pInfile->pHDU().readKey<double>("STDEV", stdev);
+        pInfile->pHDU().readKey<double>("MISS_VAL", miss_val);
+        pInfile->pHDU().readKey<double>("MISS_NUM", miss_num);
+        pInfile->pHDU().readKey<double>("DEAD_VAL", dead_val);
+        pInfile->pHDU().readKey<double>("DEAD_NUM", dead_num);
+        pInfile->pHDU().readKey<double>("SATU_VAL", satu_val);
+        pInfile->pHDU().readKey<double>("SATU_NUM", satu_num);
+        pInfile->pHDU().readKey<string>("IMGCMPRV", imgcmprv);
+        pInfile->pHDU().readKey<string>("IMGCMPAL", imgcmpal);
+        pInfile->pHDU().readKey<string>("IMGCMPPR", imgcmppr);
+        pInfile->pHDU().readKey<double>("IMG_ERR", img_err);
+        pInfile->pHDU().readKey<string>("IMGSEQC", imgseqc);
+        pInfile->pHDU().readKey<double>("IMGACCM", imgaccm);
+        pInfile->pHDU().readKey<double>("BITDEPTH", bitdepth);
+        pInfile->pHDU().readKey<string>("PLT_POW", plt_pow);
+        pInfile->pHDU().readKey<string>("PLT_STAT", plt_stat);
+        pInfile->pHDU().readKey<string>("BOL_STAT", bol_stat);
+        pInfile->pHDU().readKey<double>("BOL_TRGT", bol_trgt);
+        pInfile->pHDU().readKey<double>("BOL_RANG", bol_rang);
+        pInfile->pHDU().readKey<double>("BOL_TEMP", bol_temp);
+        pInfile->pHDU().readKey<double>("PKG_TEMP", pkg_temp);
+        pInfile->pHDU().readKey<double>("CAS_TEMP", cas_temp);
+        pInfile->pHDU().readKey<double>("SHT_TEMP", sht_temp);
+        pInfile->pHDU().readKey<double>("LEN_TEMP", len_temp);
+        pInfile->pHDU().readKey<double>("BGR_VOL", bgr_vol);
+        pInfile->pHDU().readKey<double>("VB1_VOL", vb1_vol);
+        pInfile->pHDU().readKey<double>("ADOFSVOL", adofsvol);
+        pInfile->pHDU().readKey<double>("HCE_TEMP", hce_temp);
+        pInfile->pHDU().readKey<double>("PNL_TEMP", pnl_temp);
+        pInfile->pHDU().readKey<double>("AE_TEMP", ae_temp);
+        pInfile->pHDU().readKey<double>("S_DISTHT", s_distht);
+        pInfile->pHDU().readKey<double>("S_DISTHE", s_disthe);
+        pInfile->pHDU().readKey<double>("S_DISTHS", s_disths);
+        pInfile->pHDU().readKey<double>("S_DISTTS", s_distts);
+        pInfile->pHDU().readKey<double>("S_TGRADI", s_tgradi);
+        pInfile->pHDU().readKey<double>("S_APPDIA", s_appdia);
+        pInfile->pHDU().readKey<double>("S_SOLLAT", s_sollat);
+        pInfile->pHDU().readKey<double>("S_SOLLON", s_sollon);
+        pInfile->pHDU().readKey<double>("S_SSCLAT", s_ssclat);
+        pInfile->pHDU().readKey<double>("S_SSCLON", s_ssclon);
+        pInfile->pHDU().readKey<double>("S_SSCLST", s_ssclst);
+        pInfile->pHDU().readKey<double>("S_SSCPX", s_sscpx);
+        pInfile->pHDU().readKey<double>("S_SSCPY", s_sscpy);
+        pInfile->pHDU().readKey<double>("S_SCXSAN", s_scxsan);
+        pInfile->pHDU().readKey<double>("S_SCYSAN", s_scysan);
+        pInfile->pHDU().readKey<double>("S_SCZSAN", s_sczsan);
+        pInfile->pHDU().readKey<string>("NAIFNAME", naifname);
+        pInfile->pHDU().readKey<double>("NAIFID", naifid);
+        pInfile->pHDU().readKey<string>("MKNAME", mkname);
+        pInfile->pHDU().readKey<double>("VERSION", version);
+      } catch (...) {
+      };
+
+      try {
+        pInfile->pHDU().readKey<double>("PKG_TEMP", pkgt);
+        pInfile->pHDU().readKey<double>("CAS_TEMP", cast);
+        pInfile->pHDU().readKey<double>("SHT_TEMP", shtt);
+        pInfile->pHDU().readKey<double>("LEN_TEMP", lent);
+        pInfile->pHDU().readKey<double>("BITDEPTH", bitdepth);
+      } catch (...) {
+      };
+
+      int counter = 0;
+      double tmp1 = 0;
+
+      for (int i = 0; i < Height; i++) {
+        for (int j = 0; j < Width; j++) {
+
+          tmp1 = contents[counter];
+          if (bitdepth == 19 || bitdepth == 18 || bitdepth == 17 ||
+              bitdepth == 16) {
+            tmp1 = tmp1 / 8;
+          }
+          tmp1 = tmp1 / 8;
+          if (tmp1 > MAX_V)
+            MAX_V = tmp1;
+          if (tmp1 < MIN_V)
+            MIN_V = tmp1;
+          image[Height - 1 - i][j] = tmp1;
+          counter++;
+        }
+      }
+    }
+
+    catch (FITS::CantCreate) {
+      cout << "Can't open fits image file" << endl;
+      return;
+    }
+  }
+
+  else if (ext == "txt" || ext == "dat") {
+    QFile file1(fileinfo.filePath());
+    if (!file1.open(QIODevice::ReadOnly)) {
+      printf("txt dat open error\n");
+      return;
+    }
+
+    QTextStream in1(&file1);
+    QString str1;
+
+    for (int i = 0; !in1.atEnd(); i++) {
+      for (int j = 0; j < 4; j++) {
+        in1 >> str1;
+
+        imagetmp[i][j] = str1.toDouble();
+      }
+    }
+
+    int k = 0;
+    for (int i = 0; i < 384; i++) {
+      for (int j = 0; j < 256; j++) {
+        image[255 - j][i] = imagetmp[k][3];
+        if (image[255 - j][i] > MAX_V)
+          MAX_V = image[255 - j][i];
+        if (image[255 - j][i] < MIN_V)
+          MIN_V = image[255 - j][i];
+
+        k++;
+      }
+    }
+  }
+
+  else {
+    int Count(0);
+    int i = 0;
+    int j = 0;
+    char Data;
+    short tmp;
+
+    while (!ifs.fail()) {
+
+      if (Count >= Height * Width * 2)
+        break;
+
+      ifs.read(&Data, 1);
+
+      tmp = 0xff & Data;
+
+      ++Count;
+
+      ifs.read(&Data, 1);
+
+      tmp += (0xff & Data) * 256;
+      if (tmp == -9999)
+        tmp = 0;
+
+      if (tmp > MAX_V)
+        MAX_V = tmp;
+      if (tmp < MIN_V)
+        MIN_V = tmp;
+
+      image[i][j] = (double)tmp;
+      j++;
+
+      if (Count % (Width * 2) == Width * 2 - 1) {
+        i++;
+        j = 0;
+      }
+      ++Count;
+    }
+    ifs.close();
+  }
+}
+
+void ShowImage::pixelDraw(double T) {
+
+  double d = T / 256;
+
+  for (int i = 0; i < 256; i++) {
+    colorValue[i] = d * i + MIN_V;
+  }
+
+  colorValue[255] = MAX_V + 1;
+
+  for (int i = 0; i < Height; i++) {
+    for (int j = 0; j < Width; j++) {
+      for (int k = 0; k < 256; k++) {
+        if (image[i][j] < colorValue[k]) {
+          glColor3dv(colorTable[k]);
+          glVertex2d(j, i);
+          break;
+        }
+      }
+    }
+  }
+}
+
+void ShowImage::makeColorTable() {
+  int colorArea;
+  double count = 1;
+
+  if (colorselect == 0 || fitsflag == 1) {
+    colorArea = 51;
+    for (int i = 0; i < 256; i++) {
+      if (count > colorArea)
+        count = 1;
+      if (i == 255)
+        count = 52;
+
+      if (i < colorArea) {
+        colorTable[i][0] = 1 - count / (colorArea + 1);
+        colorTable[i][1] = 0;
+        colorTable[i][2] = 1;
+      }
+      if (colorArea <= i && i < 2 * colorArea) {
+        colorTable[i][0] = 0;
+        colorTable[i][1] = count / (colorArea + 1);
+        colorTable[i][2] = 1;
+      }
+      if (2 * colorArea <= i && i < 3 * colorArea) {
+        colorTable[i][0] = 0;
+        colorTable[i][1] = 1;
+        colorTable[i][2] = 1 - count / (colorArea + 1);
+      }
+      if (3 * colorArea <= i && i < 4 * colorArea) {
+        colorTable[i][0] = count / (colorArea + 1);
+        colorTable[i][1] = 1;
+        colorTable[i][2] = 0;
+      }
+      if (4 * colorArea <= i && i < 5 * colorArea + 1) {
+        colorTable[i][0] = 1;
+        colorTable[i][1] = 1 - count / (colorArea + 2);
+        colorTable[i][2] = 0;
+      }
+      count++;
+    }
+  }
+
+  if (colorselect == 1)
+    for (int i = 0; i < 256; i++) {
+      colorTable[i][0] = (double)i / 255;
+      colorTable[i][1] = (double)i / 255;
+      colorTable[i][2] = (double)i / 255;
+    }
+
+  if (colorselect == 2) {
+    colorArea = 64;
+    for (int i = 0; i < 256; i++) {
+      if (count > colorArea)
+        count = 1;
+
+      if (i < colorArea) {
+        colorTable[i][0] = 0;
+        colorTable[i][1] = 0;
+        colorTable[i][2] = count / (colorArea + 1);
+      }
+      if (colorArea <= i && i < 2 * colorArea) {
+        colorTable[i][0] = count / (colorArea + 1);
+        colorTable[i][1] = 0;
+        colorTable[i][2] = 1 - count / (colorArea + 1);
+      }
+      if (2 * colorArea <= i && i < 3 * colorArea) {
+        colorTable[i][0] = 1;
+        colorTable[i][1] = count / (colorArea + 1);
+        colorTable[i][2] = 0;
+      }
+      if (3 * colorArea <= i && i < 4 * colorArea) {
+        colorTable[i][0] = 1;
+        colorTable[i][1] = 1;
+        colorTable[i][2] = count / (colorArea + 1);
+      }
+
+      count++;
+    }
+  }
+}
+
+void ShowImage::setValueX(QString value) {
+  int tmp = value.toInt() - 16;
+  emit valueChangedX(QString::number(tmp));
+}
+
+void ShowImage::setValueY(QString value) {
+  int tmp = value.toInt() - 6;
+  emit valueChangedY(QString::number(tmp));
+}
+
+void ShowImage::setValuePixel(QString value) { emit valueChangedPixel(value); }
+
+void ShowImage::changeParameter(double min, double max, int x) {
+  if (min != max) {
+    MAX_V = max;
+    MIN_V = min;
+  }
+  colorselect = x;
+  makeColorTable();
+  this->update();
+}
+
+void ShowImage::subtractImage(QString open, QString close) {
+
+  MAX_V = -100000;
+  MIN_V = 100000;
+
+  fstream ifs1;
+  fstream ifs2;
+
+  ifs1.open(&open.toStdString()[0], ios::in | ios::binary);
+  ifs2.open(&close.toStdString()[0], ios::in | ios::binary);
+
+  int Count(0);
+  int i = 0;
+  int j = 0;
+  char Data;
+  double tmp;
+
+  while (1) {
+    while (!ifs1.fail()) {
+
+      if (Count >= Height * Width * 2)
+        break;
+
+      ifs1.read(&Data, 1);
+
+      tmp = 0xff & Data;
+
+      ++Count;
+
+      ifs1.read(&Data, 1);
+
+      tmp += (0xff & Data) * 256;
+
+      image[i][j] = tmp;
+
+      j++;
+
+      if (Count % (Width * 2) == Width * 2 - 1) {
+        i++;
+        j = 0;
+      }
+
+      ++Count;
+    }
+
+    ifs1.close();
+
+    Count = 0;
+    i = 0;
+    j = 0;
+
+    while (!ifs2.fail()) {
+
+      if (Count >= Height * Width * 2)
+        break;
+
+      ifs2.read(&Data, 1);
+
+      tmp = 0xff & Data;
+
+      ++Count;
+
+      ifs2.read(&Data, 1);
+
+      tmp += (0xff & Data) * 256;
+
+      image[i][j] -= tmp;
+
+      if (image[i][j] > MAX_V)
+        MAX_V = image[i][j];
+      if (image[i][j] < MIN_V)
+        MIN_V = image[i][j];
+
+      j++;
+
+      if (Count % (Width * 2) == Width * 2 - 1) {
+        i++;
+        j = 0;
+      }
+
+      ++Count;
+    }
+
+    ifs2.close();
+
+    double AveOB = 0, AveCenter = 0;
+    int countB = 0, countC = 0;
+    for (int x = -2; x <= 2; x++) {
+      for (int y = -2; y <= 2; y++) {
+
+        if (image[8 + y][8 + x] < image[8][8] + 10 &&
+            image[8 + y][8 + x] > image[8][8] - 10) {
+          AveOB += image[8 + y][8 + x];
+
+          countB++;
+        }
+      }
+    }
+    AveOB /= (double)countB;
+
+    for (int x = -10; x <= 10; x++) {
+      for (int y = -10; y <= 10; y++) {
+
+        if (image[128 + y][163 + x] < image[128][163] + 10 &&
+            image[128 + y][163 + x] > image[128][163] - 10) {
+          AveCenter += image[128 + y][163 + x];
+
+          countC++;
+        }
+      }
+    }
+    AveCenter /= (double)countC;
+
+    if (AveCenter < AveOB) {
+      ifs1.open(&close.toStdString()[0], ios::in | ios::binary);
+      ifs2.open(&open.toStdString()[0], ios::in | ios::binary);
+      i = 0;
+      j = 0;
+      Count = 0;
+    } else
+      break;
+  }
+
+  makeColorTable();
+
+  this->update();
+}
+
+void ShowImage::calibrateImageforBlackbodyAllPixel(QString s, int x, int y) {
+
+  renderunitflag = false;
+
+  double h = s.section(',', -2, -2).toDouble();
+  double g = s.section(',', -3, -3).toDouble();
+  double DN = image[y + 2][x + 16];
+  double tmp1 = 0;
+  double FT = 0;
+  double FT1 = 0;
+  double FT2 = 0;
+  double FT3 = 0;
+  FT = (DN - h) / g;
+  FT1 = round1((DN - h) / g);
+  tmp1 = gettemperature(DN, FT, FT1);
+
+  calibrationImage[y + 2][x + 16] = tmp1 + 273.15;
+  fitstemperature2[y][x] = tmp1 + 273.15;
+}
+
+void ShowImage::confirmation(QString s, int x, int y, QString subFileName1) {
+  fstream ifs;
+  ifs.open(&subFileName1.toStdString()[0], ios::in | ios::binary);
+
+  QFileInfo fileinfo;
+  fileinfo.setFile(subFileName1);
+  QString ext = fileinfo.suffix();
+  ext = ext.toLower();
+
+  if (ext == "fit" || ext == "fits" || ext == "fts") {
+    valarray<long> contents;
+    auto_ptr<FITS> pInfile(0);
+    try {
+      pInfile.reset(new FITS(subFileName1.toStdString().c_str(), Read, true));
+      PHDU &fitsImage = pInfile->pHDU();
+      int fitsWidth = fitsImage.axis(0);
+      int fitsHeight = fitsImage.axis(1);
+      fitsImage.read(contents);
+
+      int counter = 0;
+      double tmp1 = 0;
+
+      for (int i = 0; i < fitsHeight; i++) {
+        for (int j = 0; j < fitsWidth; j++) {
+
+          tmp1 = contents[counter];
+          fitsimagesub[fitsHeight - i - 1][j] = tmp1;
+
+          counter++;
+        }
+      }
+    }
+
+    catch (FITS::CantCreate) {
+      cout << "Can't open fits image file" << endl;
+      return;
+    }
+  }
+
+  calibrationImage[y + 2][x + 16] = fitsimagesub[y][x];
+}
+
+void ShowImage::calibrateImagetoLadianceforBlackbodyAllPixel(QString s, int x,
+                                                             int y) {
+
+  double h = s.section(',', -2, -2).toDouble();
+  double g = s.section(',', -3, -3).toDouble();
+  double DN = image[y + 2][x + 16];
+  double tmp1 = 0;
+  double FT;
+  double FT1;
+  double FT2;
+  double FT3;
+  double epsilon = 0.925;
+  double Ladiance = 0;
+  FT = (DN - h) / g;
+  FT1 = round1((DN - h) / g);
+  FT2 = round2((DN - h) / g);
+  FT3 = round3((DN - h) / g);
+
+  tmp1 = gettemperature(DN, FT, FT1);
+
+  Ladiance =
+      epsilon *
+      ((tmp1 + 273.15) * (tmp1 + 273.15) * (tmp1 + 273.15) * (tmp1 + 273.15)) /
+      PI;
+
+  calibrationImage[y + 2][x + 16] = Ladiance;
+  fitstemperature2[y][x] = Ladiance;
+}
+
+double ShowImage::getPixelValue(int y, int x) { return image[y][x]; }
+
+void ShowImage::drawPixcelLineGraph(QString heightValue) {
+
+  QVector<double> w(Width), DN(Width);
+  bool checkInt = false;
+  int y = heightValue.toInt(&checkInt, 10);
+
+  if (0 <= y && y <= Width && checkInt == true) {
+    for (int i = 0; i < Width; i++)
+      w[i] = i;
+
+    for (int i = 0; i < Width; i++)
+      DN[i] = this->getPixelValue(y, i);
+  } else {
+  }
+
+  pg.drawGraph(w, DN);
+  pg.show();
+}
+
+double ShowImage::round3(double dIn) {
+  double dOut;
+
+  dOut = dIn * pow(10.0, 3);
+  if (dIn >= 0) {
+    dOut = (double)(int)(dOut + 0.5);
+  } else
+    dOut = (double)(int)(dOut - 0.5);
+  return dOut * pow(10.0, -3);
+}
+
+double ShowImage::round2(double dIn) {
+  double dOut;
+
+  dOut = dIn * pow(10.0, 2);
+  if (dIn >= 0) {
+    dOut = (double)(int)(dOut + 0.5);
+  } else
+    dOut = (double)(int)(dOut - 0.5);
+  return dOut * pow(10.0, -2);
+}
+
+double ShowImage::round1(double dIn) {
+  double dOut;
+
+  dOut = dIn * pow(10.0, 5);
+  if (dIn >= 0) {
+    dOut = (double)(int)(dOut + 0.5);
+  } else
+    dOut = (double)(int)(dOut - 0.5);
+  return dOut * pow(10.0, -5);
+}
+
+void ShowImage::calibrateImage(QString s, int x, int y) {
+
+  double h = s.section(',', -2, -2).toDouble();
+  double g = s.section(',', -3, -3).toDouble();
+  double f = s.section(',', -4, -4).toDouble();
+  double e = s.section(',', -5, -5).toDouble();
+  double d = s.section(',', -6, -6).toDouble();
+  double c = s.section(',', -7, -7).toDouble();
+  double b = s.section(',', -8, -8).toDouble();
+  double a = s.section(',', -9, -9).toDouble();
+
+  double DN = image[y + 2][x + 16];
+  double tmp = 0;
+
+  tmp = a * pow(DN, 7) + b * pow(DN, 6) + c * pow(DN, 5) + d * pow(DN, 4) +
+        e * pow(DN, 3) + f * pow(DN, 2) + g * DN + h;
+  calibrationImage[y + 2][x + 16] = tmp;
+}
+
+void ShowImage::updateImage(int judge, QString dirpath, QString fitdirectory) {
+
+  MAX_V = -100000;
+  MIN_V = 100000;
+
+  if (judge == 0) {
+
+    for (int i = 0; i < Height; i++) {
+      for (int j = 0; j < Width; j++) {
+
+        if (5 < i && i < 253 && 15 < j && j < 343) {
+          if (MAX_V < calibrationImage[i][j]) {
+            MAX_V = calibrationImage[i][j];
+          }
+
+          if (MIN_V > calibrationImage[i][j]) {
+            MIN_V = calibrationImage[i][j];
+          }
+
+          image[i][j] = calibrationImage[i][j];
+        }
+      }
+    }
+
+    for (int i = 0; i < Height; i++) {
+      for (int j = 0; j < Width; j++) {
+        if (!(5 < i && i < 253 && 15 < j && j < 343)) {
+          image[i][j] = MIN_V - ((MAX_V - MIN_V) / 10);
+        }
+      }
+    }
+    int k = 0;
+    for (int i = 0; i < 248; i++) {
+      for (int j = 0; j < 328; j++) {
+        fitstemperature[k] = fitstemperature2[248 - 1 - i][j];
+        k++;
+      }
+    }
+
+    makeColorTable();
+
+    this->update();
+  }
+
+  else if (judge == 1) {
+    double epsilon = 0.925;
+    double sigma = 5.67032 * pow(10, -8);
+
+    for (int i = 0; i < Height; i++) {
+      for (int j = 0; j < Width; j++) {
+
+        if (5 < i && i < 253 && 15 < j && j < 343) {
+          if (MAX_V < (epsilon * sigma * pow(calibrationImage[i][j], 4)) / PI) {
+            MAX_V = (epsilon * sigma * pow(calibrationImage[i][j], 4)) / PI;
+          }
+
+          if (MIN_V > (epsilon * sigma * pow(calibrationImage[i][j], 4)) / PI) {
+            MIN_V = (epsilon * sigma * pow(calibrationImage[i][j], 4)) / PI;
+          }
+
+          image[i][j] = (epsilon * sigma * pow(calibrationImage[i][j], 4)) / PI;
+        }
+      }
+    }
+
+    for (int i = 0; i < Height; i++) {
+      for (int j = 0; j < Width; j++) {
+        if (!(5 < i && i < 253 && 15 < j && j < 343)) {
+          image[i][j] = MIN_V - ((MAX_V - MIN_V) / 10);
+        }
+      }
+    }
+    int k = 0;
+    for (int i = 0; i < 248; i++) {
+      for (int j = 0; j < 328; j++) {
+        fitstemperature[k] = fitstemperature2[248 - 1 - i][j];
+        k++;
+      }
+    }
+
+    makeColorTable();
+
+    this->update();
+  }
+
+  long naxis = 2;
+
+  long naxes[2] = {328, 248};
+  std::auto_ptr<FITS> pFits(0);
+  std::auto_ptr<FITS> pFits1(0);
+  try {
+
+    if (fitdirectory == "") {
+      return;
+    }
+
+    string dateconversion = date;
+    string YYYY, MM, DD, hh, mm, ss;
+    string YMD, hms;
+
+    YYYY = dateconversion.substr(0, 4);
+    MM = dateconversion.substr(5, 2);
+    DD = dateconversion.substr(8, 2);
+    hh = dateconversion.substr(11, 2);
+    mm = dateconversion.substr(14, 2);
+    ss = dateconversion.substr(17, 2);
+
+    cout << YYYY << endl;
+    cout << MM << endl;
+    cout << DD << endl;
+    cout << hh << endl;
+    cout << mm << endl;
+    cout << ss << endl;
+
+    YMD = YYYY + MM + DD;
+    hms = hh + mm + ss;
+
+    QString fitfilename = QFileInfo(filename).fileName();
+    QString fitfilenamewithoutsuffix = QFileInfo(fitfilename).baseName();
+
+    const std::string fileNametemp("!" + fitdirectory.toStdString() + "/" +
+                                   fitfilenamewithoutsuffix.toStdString() +
+                                   "_l2a.fit");
+    const std::string fileNameLadiance("!" + fitdirectory.toStdString() + "/" +
+                                       fitfilenamewithoutsuffix.toStdString() +
+                                       "_l2b.fit");
+
+    pFits.reset(new FITS(fileNametemp, DOUBLE_IMG, naxis, naxes));
+    pFits1.reset(new FITS(fileNameLadiance, DOUBLE_IMG, naxis, naxes));
+  } catch (FITS::CantCreate) {
+    return;
+  }
+
+  int nelements(1);
+  nelements =
+      std::accumulate(&naxes[0], &naxes[naxis], 1, std::multiplies<double>());
+  std::valarray<double> arraytemp(nelements);
+
+  for (int i = 0; i < 328 * 248; i++) {
+    arraytemp[i] = fitstemperature[i];
+  }
+  int fpixel(1);
+
+  pFits->pHDU().addKey("ORIGIN", origin,
+                       "organization responsible for the data");
+  pFits->pHDU().addKey("DATE", date, "date of generation of HDU in UTC");
+  pFits->pHDU().addKey("DATE-BEG", date_beg,
+                       "start date of observation program (UTC)");
+  pFits->pHDU().addKey("DATE-OBS", date_obs, "start date of observation (UTC)");
+  pFits->pHDU().addKey("DATE-END", date_end, "end date of observation (UTC)");
+  pFits->pHDU().addKey("TELESCOP", telescop, "telescope used to acquire data");
+  pFits->pHDU().addKey("INSTRUME", instrume, "name of instrument");
+  pFits->pHDU().addKey("OBJECT", object, "name of observed object");
+  pFits->pHDU().addKey("BUNIT", bunit, "physical unit of array values");
+  pFits->pHDU().addKey("XPOSURE", QString::number(xposure).toStdString(),
+                       "exposure time [sec]");
+  pFits->pHDU().addKey("IFOV", QString::number(ifov).toStdString(),
+                       "instantaneous field of view [rad]");
+  pFits->pHDU().addKey("FILTER", filter, "bandpath range of filter (um)");
+  pFits->pHDU().addKey("OPRGNAME", oprgname, "observation program name");
+  pFits->pHDU().addKey("OPRGNO", oprgno, "observation program number");
+  pFits->pHDU().addKey("ROI_LLX", QString::number(roi_llx).toStdString(),
+                       "x lower-left corner pixel of image ");
+  pFits->pHDU().addKey("ROI_LLY", QString::number(roi_lly).toStdString(),
+                       "y lower-left corner pixel of image");
+  pFits->pHDU().addKey("ROI_URX", QString::number(roi_urx).toStdString(),
+                       "x upper-right corner pixel of image");
+  pFits->pHDU().addKey("ROI_URY", QString::number(roi_ury).toStdString(),
+                       "y upper-right corner pixel of image");
+  pFits->pHDU().addKey("DATAMAX", QString::number(datamax).toStdString(),
+                       "maximum data value");
+  pFits->pHDU().addKey("DATAMIN", QString::number(datamin).toStdString(),
+                       "minimum data value");
+  pFits->pHDU().addKey("MEAN", QString::number(mean).toStdString(),
+                       "mean value of the data");
+  pFits->pHDU().addKey("STDEV", QString::number(stdev).toStdString(),
+                       "standard deviation of the data");
+  pFits->pHDU().addKey("MISS_VAL", QString::number(miss_val).toStdString(),
+                       "flag value of missing pixel");
+  pFits->pHDU().addKey("MISS_NUM", QString::number(miss_num).toStdString(),
+                       "number of missing pixel");
+  pFits->pHDU().addKey("DEAD_VAL", QString::number(dead_val).toStdString(),
+                       "flag value of dead pixel");
+  pFits->pHDU().addKey("DEAD_NUM", QString::number(dead_num).toStdString(),
+                       "number of dead pixel");
+  pFits->pHDU().addKey("SATU_VAL", QString::number(satu_val).toStdString(),
+                       "flag value of saturated pixel");
+  pFits->pHDU().addKey("SATU_NUM", QString::number(satu_num).toStdString(),
+                       "number of saturated pixels");
+  pFits->pHDU().addKey("IMGCMPRV", imgcmprv,
+                       "compression rev.: RAW_DAT/LOSSLESS/LOSSY");
+  pFits->pHDU().addKey("IMGCMPAL", imgcmpal,
+                       "compression alg.: JPEG2000/STAR_PIXEL");
+  pFits->pHDU().addKey("IMGCMPPR", imgcmppr, "compression parameter");
+  pFits->pHDU().addKey("IMG_ERR", QString::number(img_err).toStdString(),
+                       "onboard image proc. return status");
+  pFits->pHDU().addKey("IMGSEQC", imgseqc, "image sequence counter");
+  pFits->pHDU().addKey("IMGACCM", QString::number(imgaccm).toStdString(),
+                       "number of accumulated images");
+  pFits->pHDU().addKey("BITDEPTH", QString::number(bitdepth).toStdString(),
+                       "image bit depth");
+  pFits->pHDU().addKey("PLT_POW", plt_pow, "peltier ON/OFF");
+  pFits->pHDU().addKey("PLT_STAT", plt_stat, "peltier status");
+  pFits->pHDU().addKey("BOL_STAT", bol_stat, "bolometer status");
+  pFits->pHDU().addKey("BOL_TRGT", QString::number(bol_trgt).toStdString(),
+                       "bolometer calibration target");
+  pFits->pHDU().addKey("BOL_RANG", QString::number(bol_rang).toStdString(),
+                       "bolometer calibration range");
+  pFits->pHDU().addKey("BOL_TEMP", QString::number(bol_temp).toStdString(),
+                       "bolometer temperature [degC]");
+  pFits->pHDU().addKey("PKG_TEMP", QString::number(pkg_temp).toStdString(),
+                       "package temperature [degC]");
+  pFits->pHDU().addKey("CAS_TEMP", QString::number(cas_temp).toStdString(),
+                       "case temperature [degC]");
+  pFits->pHDU().addKey("SHT_TEMP", QString::number(sht_temp).toStdString(),
+                       "shutter temperature [degC]");
+  pFits->pHDU().addKey("LEN_TEMP", QString::number(len_temp).toStdString(),
+                       "lens temperature [degC]");
+  pFits->pHDU().addKey("BGR_VOL", QString::number(bgr_vol).toStdString(),
+                       "BGR voltage [V]");
+  pFits->pHDU().addKey("VB1_VOL", QString::number(vb1_vol).toStdString(),
+                       "VB1 voltage [V]");
+  pFits->pHDU().addKey("ADOFSVOL", QString::number(adofsvol).toStdString(),
+                       "A/D_OFS voltage [V]");
+  pFits->pHDU().addKey("HCE_TEMP", QString::number(hce_temp).toStdString(),
+                       "HCE TIR sensor temperature [degC]");
+  pFits->pHDU().addKey("PNL_TEMP", QString::number(pnl_temp).toStdString(),
+                       "HCE TIR sensor panel temperature [degC]");
+  pFits->pHDU().addKey("AE_TEMP", QString::number(ae_temp).toStdString(),
+                       "HCE TIR analog electronics temperature [degC]");
+  pFits->pHDU().addKey("S_DISTHT", QString::number(s_distht).toStdString(),
+                       "distance between HYB2 and the target [km]");
+  pFits->pHDU().addKey("S_DISTHE", QString::number(s_disthe).toStdString(),
+                       "distance between HYB2 and Earth [km]");
+  pFits->pHDU().addKey("S_DISTHS", QString::number(s_disths).toStdString(),
+                       "distance between HYB2 and Sun [km]");
+  pFits->pHDU().addKey("S_DISTTS", QString::number(s_distts).toStdString(),
+                       "distance between the target and Sun [km]");
+  pFits->pHDU().addKey("S_TGRADI", QString::number(s_tgradi).toStdString(),
+                       "the target radius at the equator [km]");
+  pFits->pHDU().addKey("S_APPDIA", QString::number(s_appdia).toStdString(),
+                       "apparent diameter of the target [deg]");
+  pFits->pHDU().addKey("S_SOLLAT", QString::number(s_sollat).toStdString(),
+                       "sub solar latitude [deg] of the target");
+  pFits->pHDU().addKey("S_SOLLON", QString::number(s_sollon).toStdString(),
+                       "sub solar longitude [deg] of the target");
+  pFits->pHDU().addKey("S_SSCLAT", QString::number(s_ssclat).toStdString(),
+                       "sub S/C latitude [deg] of the target");
+  pFits->pHDU().addKey("S_SSCLON", QString::number(s_ssclon).toStdString(),
+                       "sub S/C longitude [deg] of the target");
+  pFits->pHDU().addKey("S_SSCLST", QString::number(s_ssclst).toStdString(),
+                       "sub S/C local solar time [h] of the target");
+  pFits->pHDU().addKey("S_SSCPX", QString::number(s_sscpx).toStdString(),
+                       "sub S/C position on Image Array (axis1)");
+  pFits->pHDU().addKey("S_SSCPY", QString::number(s_sscpy).toStdString(),
+                       "sub S/C position on Image Array (axis2)");
+  pFits->pHDU().addKey("S_SCXSAN", QString::number(s_scxsan).toStdString(),
+                       "angle of S/C X axis and Sun direction [deg]");
+  pFits->pHDU().addKey("S_SCYSAN", QString::number(s_scysan).toStdString(),
+                       "angle of S/C Y axis and Sun direction [deg]");
+  pFits->pHDU().addKey("S_SCZSAN", QString::number(s_sczsan).toStdString(),
+                       "angle of S/C Z axis and Sun directino [deg]");
+  pFits->pHDU().addKey("NAIFNAME", naifname, "SPICE instrument name");
+  pFits->pHDU().addKey("NAIFID", QString::number(naifid).toStdString(),
+                       "SPICE instrument ID");
+  pFits->pHDU().addKey("MKNAME", mkname, "SPICE Meta kernel name");
+  pFits->pHDU().addKey("VERSION", QString::number(version).toStdString(),
+                       "version of the HDU");
+
+  QFile filex(dirpath + "/UsedImage.txt");
+  if (filex.exists()) {
+    filex.open(QIODevice::ReadOnly);
+    QTextStream load(&filex);
+
+    int i = 0;
+    QString usedimage[5000];
+
+    while (!load.atEnd()) {
+      usedimage[i] = load.readLine();
+      pFits->pHDU().addKey("IMAGE" + QString::number(i).toStdString(),
+                           usedimage[i].toStdString(), "used ground data");
+      i++;
+    }
+    filex.close();
+  }
+
+  pFits->pHDU().write(fpixel, nelements, arraytemp);
+
+  int nelements1(1);
+  nelements1 =
+      std::accumulate(&naxes[0], &naxes[naxis], 1, std::multiplies<double>());
+  std::valarray<double> arrayLadiance(nelements1);
+
+  double epsilon = 0.925;
+  double sigma = 5.67032 * pow(10, -8);
+  for (int i = 0; i < 328 * 248; i++)
+
+  {
+    arrayLadiance[i] = (epsilon * sigma * pow(fitstemperature[i], 4)) / PI;
+  }
+  int fpixel1(1);
+
+  pFits1->pHDU().addKey("ORIGIN", origin,
+                        "organization responsible for the data");
+  pFits1->pHDU().addKey("DATE", date, "date of generation of HDU in UTC");
+  pFits1->pHDU().addKey("DATE-BEG", date_beg,
+                        "start date of observation program (UTC)");
+  pFits1->pHDU().addKey("DATE-OBS", date_obs,
+                        "start date of observation (UTC)");
+  pFits1->pHDU().addKey("DATE-END", date_end, "end date of observation (UTC)");
+  pFits1->pHDU().addKey("TELESCOP", telescop, "telescope used to acquire data");
+  pFits1->pHDU().addKey("INSTRUME", instrume, "name of instrument");
+  pFits1->pHDU().addKey("OBJECT", object, "name of observed object");
+  pFits1->pHDU().addKey("BUNIT", bunit, "physical unit of array values");
+  pFits1->pHDU().addKey("XPOSURE", QString::number(xposure).toStdString(),
+                        "exposure time [sec]");
+  pFits1->pHDU().addKey("IFOV", QString::number(ifov).toStdString(),
+                        "instantaneous field of view [rad]");
+  pFits1->pHDU().addKey("FILTER", filter, "bandpath range of filter (um)");
+  pFits1->pHDU().addKey("OPRGNAME", oprgname, "observation program name");
+  pFits1->pHDU().addKey("OPRGNO", oprgno, "observation program number");
+  pFits1->pHDU().addKey("ROI_LLX", QString::number(roi_llx).toStdString(),
+                        "x lower-left corner pixel of image ");
+  pFits1->pHDU().addKey("ROI_LLY", QString::number(roi_lly).toStdString(),
+                        "y lower-left corner pixel of image");
+  pFits1->pHDU().addKey("ROI_URX", QString::number(roi_urx).toStdString(),
+                        "x upper-right corner pixel of image");
+  pFits1->pHDU().addKey("ROI_URY", QString::number(roi_ury).toStdString(),
+                        "y upper-right corner pixel of image");
+  pFits1->pHDU().addKey("DATAMAX", QString::number(datamax).toStdString(),
+                        "maximum data value");
+  pFits1->pHDU().addKey("DATAMIN", QString::number(datamin).toStdString(),
+                        "minimum data value");
+  pFits1->pHDU().addKey("MEAN", QString::number(mean).toStdString(),
+                        "mean value of the data");
+  pFits1->pHDU().addKey("STDEV", QString::number(stdev).toStdString(),
+                        "standard deviation of the data");
+  pFits1->pHDU().addKey("MISS_VAL", QString::number(miss_val).toStdString(),
+                        "flag value of missing pixel");
+  pFits1->pHDU().addKey("MISS_NUM", QString::number(miss_num).toStdString(),
+                        "number of missing pixel");
+  pFits1->pHDU().addKey("DEAD_VAL", QString::number(dead_val).toStdString(),
+                        "flag value of dead pixel");
+  pFits1->pHDU().addKey("DEAD_NUM", QString::number(dead_num).toStdString(),
+                        "number of dead pixel");
+  pFits1->pHDU().addKey("SATU_VAL", QString::number(satu_val).toStdString(),
+                        "flag value of saturated pixel");
+  pFits1->pHDU().addKey("SATU_NUM", QString::number(satu_num).toStdString(),
+                        "number of saturated pixels");
+  pFits1->pHDU().addKey("IMGCMPRV", imgcmprv,
+                        "compression rev.: RAW_DAT/LOSSLESS/LOSSY");
+  pFits1->pHDU().addKey("IMGCMPAL", imgcmpal,
+                        "compression alg.: JPEG2000/STAR_PIXEL");
+  pFits1->pHDU().addKey("IMGCMPPR", imgcmppr, "compression parameter");
+  pFits1->pHDU().addKey("IMG_ERR", QString::number(img_err).toStdString(),
+                        "onboard image proc. return status");
+  pFits1->pHDU().addKey("IMGSEQC", imgseqc, "image sequence counter");
+  pFits1->pHDU().addKey("IMGACCM", QString::number(imgaccm).toStdString(),
+                        "number of accumulated images");
+  pFits1->pHDU().addKey("BITDEPTH", QString::number(bitdepth).toStdString(),
+                        "image bit depth");
+  pFits1->pHDU().addKey("PLT_POW", plt_pow, "peltier ON/OFF");
+  pFits1->pHDU().addKey("PLT_STAT", plt_stat, "peltier status");
+  pFits1->pHDU().addKey("BOL_STAT", bol_stat, "bolometer status");
+  pFits1->pHDU().addKey("BOL_TRGT", QString::number(bol_trgt).toStdString(),
+                        "bolometer calibration target");
+  pFits1->pHDU().addKey("BOL_RANG", QString::number(bol_rang).toStdString(),
+                        "bolometer calibration range");
+  pFits1->pHDU().addKey("BOL_TEMP", QString::number(bol_temp).toStdString(),
+                        "bolometer temperature [degC]");
+  pFits1->pHDU().addKey("PKG_TEMP", QString::number(pkg_temp).toStdString(),
+                        "package temperature [degC]");
+  pFits1->pHDU().addKey("CAS_TEMP", QString::number(cas_temp).toStdString(),
+                        "case temperature [degC]");
+  pFits1->pHDU().addKey("SHT_TEMP", QString::number(sht_temp).toStdString(),
+                        "shutter temperature [degC]");
+  pFits1->pHDU().addKey("LEN_TEMP", QString::number(len_temp).toStdString(),
+                        "lens temperature [degC]");
+  pFits1->pHDU().addKey("BGR_VOL", QString::number(bgr_vol).toStdString(),
+                        "BGR voltage [V]");
+  pFits1->pHDU().addKey("VB1_VOL", QString::number(vb1_vol).toStdString(),
+                        "VB1 voltage [V]");
+  pFits1->pHDU().addKey("ADOFSVOL", QString::number(adofsvol).toStdString(),
+                        "A/D_OFS voltage [V]");
+  pFits1->pHDU().addKey("HCE_TEMP", QString::number(hce_temp).toStdString(),
+                        "HCE TIR sensor temperature [degC]");
+  pFits1->pHDU().addKey("PNL_TEMP", QString::number(pnl_temp).toStdString(),
+                        "HCE TIR sensor panel temperature [degC]");
+  pFits1->pHDU().addKey("AE_TEMP", QString::number(ae_temp).toStdString(),
+                        "HCE TIR analog electronics temperature [degC]");
+  pFits1->pHDU().addKey("S_DISTHT", QString::number(s_distht).toStdString(),
+                        "distance between HYB2 and the target [km]");
+  pFits1->pHDU().addKey("S_DISTHE", QString::number(s_disthe).toStdString(),
+                        "distance between HYB2 and Earth [km]");
+  pFits1->pHDU().addKey("S_DISTHS", QString::number(s_disths).toStdString(),
+                        "distance between HYB2 and Sun [km]");
+  pFits1->pHDU().addKey("S_DISTTS", QString::number(s_distts).toStdString(),
+                        "distance between the target and Sun [km]");
+  pFits1->pHDU().addKey("S_TGRADI", QString::number(s_tgradi).toStdString(),
+                        "the target radius at the equator [km]");
+  pFits1->pHDU().addKey("S_APPDIA", QString::number(s_appdia).toStdString(),
+                        "apparent diameter of the target [deg]");
+  pFits1->pHDU().addKey("S_SOLLAT", QString::number(s_sollat).toStdString(),
+                        "sub solar latitude [deg] of the target");
+  pFits1->pHDU().addKey("S_SOLLON", QString::number(s_sollon).toStdString(),
+                        "sub solar longitude [deg] of the target");
+  pFits1->pHDU().addKey("S_SSCLAT", QString::number(s_ssclat).toStdString(),
+                        "sub S/C latitude [deg] of the target");
+  pFits1->pHDU().addKey("S_SSCLON", QString::number(s_ssclon).toStdString(),
+                        "sub S/C longitude [deg] of the target");
+  pFits1->pHDU().addKey("S_SSCLST", QString::number(s_ssclst).toStdString(),
+                        "sub S/C local solar time [h] of the target");
+  pFits1->pHDU().addKey("S_SSCPX", QString::number(s_sscpx).toStdString(),
+                        "sub S/C position on Image Array (axis1)");
+  pFits1->pHDU().addKey("S_SSCPY", QString::number(s_sscpy).toStdString(),
+                        "sub S/C position on Image Array (axis2)");
+  pFits1->pHDU().addKey("S_SCXSAN", QString::number(s_scxsan).toStdString(),
+                        "angle of S/C X axis and Sun direction [deg]");
+  pFits1->pHDU().addKey("S_SCYSAN", QString::number(s_scysan).toStdString(),
+                        "angle of S/C Y axis and Sun direction [deg]");
+  pFits1->pHDU().addKey("S_SCZSAN", QString::number(s_sczsan).toStdString(),
+                        "angle of S/C Z axis and Sun directino [deg]");
+  pFits1->pHDU().addKey("NAIFNAME", naifname, "SPICE instrument name");
+  pFits1->pHDU().addKey("NAIFID", QString::number(naifid).toStdString(),
+                        "SPICE instrument ID");
+  pFits1->pHDU().addKey("MKNAME", mkname, "SPICE Meta kernel name");
+  pFits1->pHDU().addKey("VERSION", QString::number(version).toStdString(),
+                        "version of the HDU");
+
+  if (filex.exists()) {
+    filex.open(QIODevice::ReadOnly);
+    QTextStream load(&filex);
+
+    int i = 0;
+    QString usedimage[5000];
+
+    while (!load.atEnd()) {
+      usedimage[i] = load.readLine();
+      pFits1->pHDU().addKey("IMAGE" + QString::number(i).toStdString(),
+                            usedimage[i].toStdString(), "used ground data");
+      i++;
+    }
+    filex.close();
+  }
+
+  pFits1->pHDU().write(fpixel1, nelements1, arrayLadiance);
+}
+
+void ShowImage::initializeCalibrateImage() {
+  for (int i = 0; i < Height; i++) {
+    for (int j = 0; j < Width; j++) {
+
+      calibrationImage[i][j] = 0;
+    }
+  }
+}
+
+void ShowImage::loadImageD(QVector<double> img) {
+  int count = 0;
+  MAX_V = -10000;
+  MIN_V = 10000;
+  for (int i = 0; i < Height; i++) {
+    for (int j = 0; j < Width; j++) {
+      image[i][j] = img[count];
+      if (image[i][j] > MAX_V)
+        MAX_V = image[i][j];
+      if (image[i][j] < MIN_V)
+        MIN_V = image[i][j];
+      count++;
+    }
+  }
+
+  for (int i = 1;; i++) {
+    if (100 * (i - 1) < MAX_V && MAX_V < 100 * i) {
+      MAX_V = 100 * i;
+      break;
+    }
+  }
+
+  makeColorTable();
+
+  this->update();
+}
+
+void ShowImage::loadTxtImageD(QString name) {
+
+  MAX_V = 0;
+  MIN_V = 100000;
+
+  openTxtImageD(name);
+
+  qDebug() << "1";
+
+  makeColorTable();
+
+  this->update();
+}
+
+int ShowImage::getMaxDN() { return MAX_V; }
+
+int ShowImage::getMinDN() { return MIN_V; }
+
+QVector<double> ShowImage::getImageD() {
+
+  QVector<double> tmp;
+
+  for (int i = 0; i < 256; i++) {
+    for (int j = 0; j < 384; j++) {
+      tmp.append(image[i][j]);
+    }
+  }
+
+  return tmp;
+}
+
+void ShowImage::openTxtImageD(QString name) {
+
+  QFile read(name);
+  QString tmpS;
+
+  if (!read.open(QIODevice::ReadOnly))
+    return;
+
+  int i = 0;
+  int j = 0;
+  double tmp;
+
+  qDebug() << "2";
+
+  QTextStream in(&read);
+
+  while (!in.atEnd()) {
+    in >> tmpS;
+    tmp = tmpS.toDouble();
+
+    if (251 > i && i > 8 && 342 > j && j > 6) {
+      if (tmp > MAX_V)
+        MAX_V = tmp;
+      if (tmp < MIN_V)
+        MIN_V = tmp;
+    }
+    image[i][j] = tmp;
+
+    j++;
+
+    if (j / (Width) == 1) {
+      i++;
+      j = 0;
+    }
+  }
+
+  read.close();
+}
+
+double ShowImage::planck(double T) {
+
+  double lambda, Bt, integral = 0, epsilon = 0.925;
+
+  for (int i = 1; i < 2001; i++) {
+
+    lambda = (double)i * 1e-8;
+
+    Bt = ((2 * h_planck * c_speed * c_speed) / (pow(lambda, 5)) /
+          (pow(M_E, c2 / (lambda * T)) - 1.0) *
+          tirfilterforshowimage[i - 1][1] * epsilon);
+    integral += (PI * Bt);
+  }
+  integral *= 1e-8;
+  return integral;
+}
+
+void ShowImage::loadFilter() {
+
+  QString str;
+
+  QString appPath;
+
+  appPath = QCoreApplication::applicationDirPath();
+
+  QFile file(appPath + "/tir_response.txt");
+
+  if (!file.open(QIODevice::ReadOnly)) {
+    printf("tir_response.txt open error\n");
+    return;
+  }
+
+  QTextStream in(&file);
+
+  for (int i = 0; !in.atEnd(); i++) {
+    for (int j = 0; j < 3; j++) {
+      in >> str;
+
+      tirfilterforshowimage[i][j] = str.toDouble();
+    }
+  }
+}
+
+void ShowImage::connectDB() {
+  db.open();
+
+  query = QSqlQuery(db);
+  if (query.isActive()) {
+    query.first();
+  }
+}
+
+double ShowImage::gettemperature(double DN, double FT, double FT1) {
+
+  double tmp1 = 0;
+
+  if (FT1 <= 0)
+    tmp1 = -273.15;
+  else if (FT1 <= 0.00011) {
+    if (FT1 == 9e-05)
+      tmp1 = -199;
+    else if (FT1 <= 9e-05)
+      tmp1 = -198.9;
+    else if (FT1 <= 9e-05)
+      tmp1 = -198.8;
+    else if (FT1 <= 0.0001)
+      tmp1 = -198.7;
+    else if (FT1 <= 0.0001)
+      tmp1 = -198.6;
+    else if (FT1 <= 0.0001)
+      tmp1 = -198.5;
+    else if (FT1 <= 0.0001)
+      tmp1 = -198.4;
+    else if (FT1 <= 0.00011)
+      tmp1 = -198.3;
+    else if (FT1 <= 0.00011)
+      tmp1 = -198.2;
+    else if (FT1 <= 0.00011)
+      tmp1 = -198.1;
+    else if (FT1 <= 0.00011)
+      tmp1 = -198;
+  } else if (FT1 <= 0.00014) {
+    if (FT1 == 0.00011)
+      tmp1 = -198;
+    else if (FT1 <= 0.00012)
+      tmp1 = -197.9;
+    else if (FT1 <= 0.00012)
+      tmp1 = -197.8;
+    else if (FT1 <= 0.00012)
+      tmp1 = -197.7;
+    else if (FT1 <= 0.00012)
+      tmp1 = -197.6;
+    else if (FT1 <= 0.00013)
+      tmp1 = -197.5;
+    else if (FT1 <= 0.00013)
+      tmp1 = -197.4;
+    else if (FT1 <= 0.00013)
+      tmp1 = -197.3;
+    else if (FT1 <= 0.00014)
+      tmp1 = -197.2;
+    else if (FT1 <= 0.00014)
+      tmp1 = -197.1;
+    else if (FT1 <= 0.00014)
+      tmp1 = -197;
+  } else if (FT1 <= 0.00017) {
+    if (FT1 == 0.00014)
+      tmp1 = -197;
+    else if (FT1 <= 0.00014)
+      tmp1 = -196.9;
+    else if (FT1 <= 0.00015)
+      tmp1 = -196.8;
+    else if (FT1 <= 0.00015)
+      tmp1 = -196.7;
+    else if (FT1 <= 0.00015)
+      tmp1 = -196.6;
+    else if (FT1 <= 0.00016)
+      tmp1 = -196.5;
+    else if (FT1 <= 0.00016)
+      tmp1 = -196.4;
+    else if (FT1 <= 0.00017)
+      tmp1 = -196.3;
+    else if (FT1 <= 0.00017)
+      tmp1 = -196.2;
+    else if (FT1 <= 0.00017)
+      tmp1 = -196.1;
+    else if (FT1 <= 0.00018)
+      tmp1 = -196;
+  } else if (FT1 <= 0.00021) {
+    if (FT1 == 0.00018)
+      tmp1 = -196;
+    else if (FT1 <= 0.00018)
+      tmp1 = -195.9;
+    else if (FT1 <= 0.00018)
+      tmp1 = -195.8;
+    else if (FT1 <= 0.00019)
+      tmp1 = -195.7;
+    else if (FT1 <= 0.00019)
+      tmp1 = -195.6;
+    else if (FT1 <= 0.0002)
+      tmp1 = -195.5;
+    else if (FT1 <= 0.0002)
+      tmp1 = -195.4;
+    else if (FT1 <= 0.00021)
+      tmp1 = -195.3;
+    else if (FT1 <= 0.00021)
+      tmp1 = -195.2;
+    else if (FT1 <= 0.00021)
+      tmp1 = -195.1;
+    else if (FT1 <= 0.00022)
+      tmp1 = -195;
+  } else if (FT1 <= 0.00026) {
+    if (FT1 == 0.00022)
+      tmp1 = -195;
+    else if (FT1 <= 0.00022)
+      tmp1 = -194.9;
+    else if (FT1 <= 0.00023)
+      tmp1 = -194.8;
+    else if (FT1 <= 0.00023)
+      tmp1 = -194.7;
+    else if (FT1 <= 0.00024)
+      tmp1 = -194.6;
+    else if (FT1 <= 0.00024)
+      tmp1 = -194.5;
+    else if (FT1 <= 0.00025)
+      tmp1 = -194.4;
+    else if (FT1 <= 0.00025)
+      tmp1 = -194.3;
+    else if (FT1 <= 0.00026)
+      tmp1 = -194.2;
+    else if (FT1 <= 0.00026)
+      tmp1 = -194.1;
+    else if (FT1 <= 0.00027)
+      tmp1 = -194;
+  } else if (FT1 <= 0.00032) {
+    if (FT1 == 0.00027)
+      tmp1 = -194;
+    else if (FT1 <= 0.00027)
+      tmp1 = -193.9;
+    else if (FT1 <= 0.00028)
+      tmp1 = -193.8;
+    else if (FT1 <= 0.00029)
+      tmp1 = -193.7;
+    else if (FT1 <= 0.00029)
+      tmp1 = -193.6;
+    else if (FT1 <= 0.0003)
+      tmp1 = -193.5;
+    else if (FT1 <= 0.0003)
+      tmp1 = -193.4;
+    else if (FT1 <= 0.00031)
+      tmp1 = -193.3;
+    else if (FT1 <= 0.00032)
+      tmp1 = -193.2;
+    else if (FT1 <= 0.00032)
+      tmp1 = -193.1;
+    else if (FT1 <= 0.00033)
+      tmp1 = -193;
+  } else if (FT1 <= 0.0004) {
+    if (FT1 == 0.00033)
+      tmp1 = -193;
+    else if (FT1 <= 0.00034)
+      tmp1 = -192.9;
+    else if (FT1 <= 0.00034)
+      tmp1 = -192.8;
+    else if (FT1 <= 0.00035)
+      tmp1 = -192.7;
+    else if (FT1 <= 0.00036)
+      tmp1 = -192.6;
+    else if (FT1 <= 0.00036)
+      tmp1 = -192.5;
+    else if (FT1 <= 0.00037)
+      tmp1 = -192.4;
+    else if (FT1 <= 0.00038)
+      tmp1 = -192.3;
+    else if (FT1 <= 0.00039)
+      tmp1 = -192.2;
+    else if (FT1 <= 0.0004)
+      tmp1 = -192.1;
+    else if (FT1 <= 0.0004)
+      tmp1 = -192;
+  } else if (FT1 <= 0.00048) {
+    if (FT1 == 0.0004)
+      tmp1 = -192;
+    else if (FT1 <= 0.00041)
+      tmp1 = -191.9;
+    else if (FT1 <= 0.00042)
+      tmp1 = -191.8;
+    else if (FT1 <= 0.00043)
+      tmp1 = -191.7;
+    else if (FT1 <= 0.00044)
+      tmp1 = -191.6;
+    else if (FT1 <= 0.00044)
+      tmp1 = -191.5;
+    else if (FT1 <= 0.00045)
+      tmp1 = -191.4;
+    else if (FT1 <= 0.00046)
+      tmp1 = -191.3;
+    else if (FT1 <= 0.00047)
+      tmp1 = -191.2;
+    else if (FT1 <= 0.00048)
+      tmp1 = -191.1;
+    else if (FT1 <= 0.00049)
+      tmp1 = -191;
+  } else if (FT1 <= 0.00058) {
+    if (FT1 == 0.00049)
+      tmp1 = -191;
+    else if (FT1 <= 0.0005)
+      tmp1 = -190.9;
+    else if (FT1 <= 0.00051)
+      tmp1 = -190.8;
+    else if (FT1 <= 0.00052)
+      tmp1 = -190.7;
+    else if (FT1 <= 0.00053)
+      tmp1 = -190.6;
+    else if (FT1 <= 0.00054)
+      tmp1 = -190.5;
+    else if (FT1 <= 0.00055)
+      tmp1 = -190.4;
+    else if (FT1 <= 0.00056)
+      tmp1 = -190.3;
+    else if (FT1 <= 0.00057)
+      tmp1 = -190.2;
+    else if (FT1 <= 0.00058)
+      tmp1 = -190.1;
+    else if (FT1 <= 0.00059)
+      tmp1 = -190;
+  } else if (FT1 <= 0.0007) {
+    if (FT1 == 0.00059)
+      tmp1 = -190;
+    else if (FT1 <= 0.0006)
+      tmp1 = -189.9;
+    else if (FT1 <= 0.00061)
+      tmp1 = -189.8;
+    else if (FT1 <= 0.00063)
+      tmp1 = -189.7;
+    else if (FT1 <= 0.00064)
+      tmp1 = -189.6;
+    else if (FT1 <= 0.00065)
+      tmp1 = -189.5;
+    else if (FT1 <= 0.00066)
+      tmp1 = -189.4;
+    else if (FT1 <= 0.00067)
+      tmp1 = -189.3;
+    else if (FT1 <= 0.00069)
+      tmp1 = -189.2;
+    else if (FT1 <= 0.0007)
+      tmp1 = -189.1;
+    else if (FT1 <= 0.00071)
+      tmp1 = -189;
+  } else if (FT1 <= 0.00084) {
+    if (FT1 == 0.00071)
+      tmp1 = -189;
+    else if (FT1 <= 0.00073)
+      tmp1 = -188.9;
+    else if (FT1 <= 0.00074)
+      tmp1 = -188.8;
+    else if (FT1 <= 0.00075)
+      tmp1 = -188.7;
+    else if (FT1 <= 0.00077)
+      tmp1 = -188.6;
+    else if (FT1 <= 0.00078)
+      tmp1 = -188.5;
+    else if (FT1 <= 0.00079)
+      tmp1 = -188.4;
+    else if (FT1 <= 0.00081)
+      tmp1 = -188.3;
+    else if (FT1 <= 0.00082)
+      tmp1 = -188.2;
+    else if (FT1 <= 0.00084)
+      tmp1 = -188.1;
+    else if (FT1 <= 0.00085)
+      tmp1 = -188;
+  } else if (FT1 <= 0.001) {
+    if (FT1 == 0.00085)
+      tmp1 = -188;
+    else if (FT1 <= 0.00087)
+      tmp1 = -187.9;
+    else if (FT1 <= 0.00089)
+      tmp1 = -187.8;
+    else if (FT1 <= 0.0009)
+      tmp1 = -187.7;
+    else if (FT1 <= 0.00092)
+      tmp1 = -187.6;
+    else if (FT1 <= 0.00093)
+      tmp1 = -187.5;
+    else if (FT1 <= 0.00095)
+      tmp1 = -187.4;
+    else if (FT1 <= 0.00097)
+      tmp1 = -187.3;
+    else if (FT1 <= 0.00098)
+      tmp1 = -187.2;
+    else if (FT1 <= 0.001)
+      tmp1 = -187.1;
+    else if (FT1 <= 0.00102)
+      tmp1 = -187;
+  } else if (FT1 <= 0.00119) {
+    if (FT1 == 0.00102)
+      tmp1 = -187;
+    else if (FT1 <= 0.00104)
+      tmp1 = -186.9;
+    else if (FT1 <= 0.00106)
+      tmp1 = -186.8;
+    else if (FT1 <= 0.00107)
+      tmp1 = -186.7;
+    else if (FT1 <= 0.00109)
+      tmp1 = -186.6;
+    else if (FT1 <= 0.00111)
+      tmp1 = -186.5;
+    else if (FT1 <= 0.00113)
+      tmp1 = -186.4;
+    else if (FT1 <= 0.00115)
+      tmp1 = -186.3;
+    else if (FT1 <= 0.00117)
+      tmp1 = -186.2;
+    else if (FT1 <= 0.00119)
+      tmp1 = -186.1;
+    else if (FT1 <= 0.00121)
+      tmp1 = -186;
+  } else if (FT1 <= 0.00141) {
+    if (FT1 == 0.00121)
+      tmp1 = -186;
+    else if (FT1 <= 0.00123)
+      tmp1 = -185.9;
+    else if (FT1 <= 0.00126)
+      tmp1 = -185.8;
+    else if (FT1 <= 0.00128)
+      tmp1 = -185.7;
+    else if (FT1 <= 0.0013)
+      tmp1 = -185.6;
+    else if (FT1 <= 0.00132)
+      tmp1 = -185.5;
+    else if (FT1 <= 0.00134)
+      tmp1 = -185.4;
+    else if (FT1 <= 0.00137)
+      tmp1 = -185.3;
+    else if (FT1 <= 0.00139)
+      tmp1 = -185.2;
+    else if (FT1 <= 0.00141)
+      tmp1 = -185.1;
+    else if (FT1 <= 0.00144)
+      tmp1 = -185;
+  } else if (FT1 <= 0.00167) {
+    if (FT1 == 0.00144)
+      tmp1 = -185;
+    else if (FT1 <= 0.00146)
+      tmp1 = -184.9;
+    else if (FT1 <= 0.00149)
+      tmp1 = -184.8;
+    else if (FT1 <= 0.00151)
+      tmp1 = -184.7;
+    else if (FT1 <= 0.00154)
+      tmp1 = -184.6;
+    else if (FT1 <= 0.00156)
+      tmp1 = -184.5;
+    else if (FT1 <= 0.00159)
+      tmp1 = -184.4;
+    else if (FT1 <= 0.00162)
+      tmp1 = -184.3;
+    else if (FT1 <= 0.00164)
+      tmp1 = -184.2;
+    else if (FT1 <= 0.00167)
+      tmp1 = -184.1;
+    else if (FT1 <= 0.0017)
+      tmp1 = -184;
+  } else if (FT1 <= 0.00197) {
+    if (FT1 == 0.0017)
+      tmp1 = -184;
+    else if (FT1 <= 0.00173)
+      tmp1 = -183.9;
+    else if (FT1 <= 0.00175)
+      tmp1 = -183.8;
+    else if (FT1 <= 0.00178)
+      tmp1 = -183.7;
+    else if (FT1 <= 0.00181)
+      tmp1 = -183.6;
+    else if (FT1 <= 0.00184)
+      tmp1 = -183.5;
+    else if (FT1 <= 0.00187)
+      tmp1 = -183.4;
+    else if (FT1 <= 0.0019)
+      tmp1 = -183.3;
+    else if (FT1 <= 0.00193)
+      tmp1 = -183.2;
+    else if (FT1 <= 0.00197)
+      tmp1 = -183.1;
+    else if (FT1 <= 0.002)
+      tmp1 = -183;
+  } else if (FT1 <= 0.00231) {
+    if (FT1 == 0.002)
+      tmp1 = -183;
+    else if (FT1 <= 0.00203)
+      tmp1 = -182.9;
+    else if (FT1 <= 0.00206)
+      tmp1 = -182.8;
+    else if (FT1 <= 0.0021)
+      tmp1 = -182.7;
+    else if (FT1 <= 0.00213)
+      tmp1 = -182.6;
+    else if (FT1 <= 0.00216)
+      tmp1 = -182.5;
+    else if (FT1 <= 0.0022)
+      tmp1 = -182.4;
+    else if (FT1 <= 0.00223)
+      tmp1 = -182.3;
+    else if (FT1 <= 0.00227)
+      tmp1 = -182.2;
+    else if (FT1 <= 0.00231)
+      tmp1 = -182.1;
+    else if (FT1 <= 0.00234)
+      tmp1 = -182;
+  } else if (FT1 <= 0.0027) {
+    if (FT1 == 0.00234)
+      tmp1 = -182;
+    else if (FT1 <= 0.00238)
+      tmp1 = -181.9;
+    else if (FT1 <= 0.00242)
+      tmp1 = -181.8;
+    else if (FT1 <= 0.00246)
+      tmp1 = -181.7;
+    else if (FT1 <= 0.0025)
+      tmp1 = -181.6;
+    else if (FT1 <= 0.00253)
+      tmp1 = -181.5;
+    else if (FT1 <= 0.00257)
+      tmp1 = -181.4;
+    else if (FT1 <= 0.00261)
+      tmp1 = -181.3;
+    else if (FT1 <= 0.00266)
+      tmp1 = -181.2;
+    else if (FT1 <= 0.0027)
+      tmp1 = -181.1;
+    else if (FT1 <= 0.00274)
+      tmp1 = -181;
+  } else if (FT1 <= 0.00314) {
+    if (FT1 == 0.00274)
+      tmp1 = -181;
+    else if (FT1 <= 0.00278)
+      tmp1 = -180.9;
+    else if (FT1 <= 0.00282)
+      tmp1 = -180.8;
+    else if (FT1 <= 0.00287)
+      tmp1 = -180.7;
+    else if (FT1 <= 0.00291)
+      tmp1 = -180.6;
+    else if (FT1 <= 0.00296)
+      tmp1 = -180.5;
+    else if (FT1 <= 0.003)
+      tmp1 = -180.4;
+    else if (FT1 <= 0.00305)
+      tmp1 = -180.3;
+    else if (FT1 <= 0.0031)
+      tmp1 = -180.2;
+    else if (FT1 <= 0.00314)
+      tmp1 = -180.1;
+    else if (FT1 <= 0.00319)
+      tmp1 = -180;
+  } else if (FT1 <= 0.00365) {
+    if (FT1 == 0.00319)
+      tmp1 = -180;
+    else if (FT1 <= 0.00324)
+      tmp1 = -179.9;
+    else if (FT1 <= 0.00329)
+      tmp1 = -179.8;
+    else if (FT1 <= 0.00334)
+      tmp1 = -179.7;
+    else if (FT1 <= 0.00339)
+      tmp1 = -179.6;
+    else if (FT1 <= 0.00344)
+      tmp1 = -179.5;
+    else if (FT1 <= 0.00349)
+      tmp1 = -179.4;
+    else if (FT1 <= 0.00355)
+      tmp1 = -179.3;
+    else if (FT1 <= 0.0036)
+      tmp1 = -179.2;
+    else if (FT1 <= 0.00365)
+      tmp1 = -179.1;
+    else if (FT1 <= 0.00371)
+      tmp1 = -179;
+  } else if (FT1 <= 0.00423) {
+    if (FT1 == 0.00371)
+      tmp1 = -179;
+    else if (FT1 <= 0.00376)
+      tmp1 = -178.9;
+    else if (FT1 <= 0.00382)
+      tmp1 = -178.8;
+    else if (FT1 <= 0.00388)
+      tmp1 = -178.7;
+    else if (FT1 <= 0.00393)
+      tmp1 = -178.6;
+    else if (FT1 <= 0.00399)
+      tmp1 = -178.5;
+    else if (FT1 <= 0.00405)
+      tmp1 = -178.4;
+    else if (FT1 <= 0.00411)
+      tmp1 = -178.3;
+    else if (FT1 <= 0.00417)
+      tmp1 = -178.2;
+    else if (FT1 <= 0.00423)
+      tmp1 = -178.1;
+    else if (FT1 <= 0.00429)
+      tmp1 = -178;
+  } else if (FT1 <= 0.00489) {
+    if (FT1 == 0.00429)
+      tmp1 = -178;
+    else if (FT1 <= 0.00436)
+      tmp1 = -177.9;
+    else if (FT1 <= 0.00442)
+      tmp1 = -177.8;
+    else if (FT1 <= 0.00448)
+      tmp1 = -177.7;
+    else if (FT1 <= 0.00455)
+      tmp1 = -177.6;
+    else if (FT1 <= 0.00462)
+      tmp1 = -177.5;
+    else if (FT1 <= 0.00468)
+      tmp1 = -177.4;
+    else if (FT1 <= 0.00475)
+      tmp1 = -177.3;
+    else if (FT1 <= 0.00482)
+      tmp1 = -177.2;
+    else if (FT1 <= 0.00489)
+      tmp1 = -177.1;
+    else if (FT1 <= 0.00496)
+      tmp1 = -177;
+  } else if (FT1 <= 0.00563) {
+    if (FT1 == 0.00496)
+      tmp1 = -177;
+    else if (FT1 <= 0.00503)
+      tmp1 = -176.9;
+    else if (FT1 <= 0.0051)
+      tmp1 = -176.8;
+    else if (FT1 <= 0.00517)
+      tmp1 = -176.7;
+    else if (FT1 <= 0.00525)
+      tmp1 = -176.6;
+    else if (FT1 <= 0.00532)
+      tmp1 = -176.5;
+    else if (FT1 <= 0.0054)
+      tmp1 = -176.4;
+    else if (FT1 <= 0.00547)
+      tmp1 = -176.3;
+    else if (FT1 <= 0.00555)
+      tmp1 = -176.2;
+    else if (FT1 <= 0.00563)
+      tmp1 = -176.1;
+    else if (FT1 <= 0.00571)
+      tmp1 = -176;
+  } else if (FT1 <= 0.00647) {
+    if (FT1 == 0.00571)
+      tmp1 = -176;
+    else if (FT1 <= 0.00579)
+      tmp1 = -175.9;
+    else if (FT1 <= 0.00587)
+      tmp1 = -175.8;
+    else if (FT1 <= 0.00595)
+      tmp1 = -175.7;
+    else if (FT1 <= 0.00604)
+      tmp1 = -175.6;
+    else if (FT1 <= 0.00612)
+      tmp1 = -175.5;
+    else if (FT1 <= 0.00621)
+      tmp1 = -175.4;
+    else if (FT1 <= 0.00629)
+      tmp1 = -175.3;
+    else if (FT1 <= 0.00638)
+      tmp1 = -175.2;
+    else if (FT1 <= 0.00647)
+      tmp1 = -175.1;
+    else if (FT1 <= 0.00656)
+      tmp1 = -175;
+  } else if (FT1 <= 0.00741) {
+    if (FT1 == 0.00656)
+      tmp1 = -175;
+    else if (FT1 <= 0.00665)
+      tmp1 = -174.9;
+    else if (FT1 <= 0.00674)
+      tmp1 = -174.8;
+    else if (FT1 <= 0.00683)
+      tmp1 = -174.7;
+    else if (FT1 <= 0.00692)
+      tmp1 = -174.6;
+    else if (FT1 <= 0.00702)
+      tmp1 = -174.5;
+    else if (FT1 <= 0.00712)
+      tmp1 = -174.4;
+    else if (FT1 <= 0.00721)
+      tmp1 = -174.3;
+    else if (FT1 <= 0.00731)
+      tmp1 = -174.2;
+    else if (FT1 <= 0.00741)
+      tmp1 = -174.1;
+    else if (FT1 <= 0.00751)
+      tmp1 = -174;
+  } else if (FT1 <= 0.00847) {
+    if (FT1 == 0.00751)
+      tmp1 = -174;
+    else if (FT1 <= 0.00761)
+      tmp1 = -173.9;
+    else if (FT1 <= 0.00771)
+      tmp1 = -173.8;
+    else if (FT1 <= 0.00782)
+      tmp1 = -173.7;
+    else if (FT1 <= 0.00792)
+      tmp1 = -173.6;
+    else if (FT1 <= 0.00803)
+      tmp1 = -173.5;
+    else if (FT1 <= 0.00814)
+      tmp1 = -173.4;
+    else if (FT1 <= 0.00825)
+      tmp1 = -173.3;
+    else if (FT1 <= 0.00836)
+      tmp1 = -173.2;
+    else if (FT1 <= 0.00847)
+      tmp1 = -173.1;
+    else if (FT1 <= 0.00858)
+      tmp1 = -173;
+  } else if (FT1 <= 0.00965) {
+    if (FT1 == 0.00858)
+      tmp1 = -173;
+    else if (FT1 <= 0.00869)
+      tmp1 = -172.9;
+    else if (FT1 <= 0.00881)
+      tmp1 = -172.8;
+    else if (FT1 <= 0.00892)
+      tmp1 = -172.7;
+    else if (FT1 <= 0.00904)
+      tmp1 = -172.6;
+    else if (FT1 <= 0.00916)
+      tmp1 = -172.5;
+    else if (FT1 <= 0.00928)
+      tmp1 = -172.4;
+    else if (FT1 <= 0.0094)
+      tmp1 = -172.3;
+    else if (FT1 <= 0.00953)
+      tmp1 = -172.2;
+    else if (FT1 <= 0.00965)
+      tmp1 = -172.1;
+    else if (FT1 <= 0.00978)
+      tmp1 = -172;
+  } else if (FT1 <= 0.01097) {
+    if (FT1 == 0.00978)
+      tmp1 = -172;
+    else if (FT1 <= 0.0099)
+      tmp1 = -171.9;
+    else if (FT1 <= 0.01003)
+      tmp1 = -171.8;
+    else if (FT1 <= 0.01016)
+      tmp1 = -171.7;
+    else if (FT1 <= 0.01029)
+      tmp1 = -171.6;
+    else if (FT1 <= 0.01043)
+      tmp1 = -171.5;
+    else if (FT1 <= 0.01056)
+      tmp1 = -171.4;
+    else if (FT1 <= 0.0107)
+      tmp1 = -171.3;
+    else if (FT1 <= 0.01083)
+      tmp1 = -171.2;
+    else if (FT1 <= 0.01097)
+      tmp1 = -171.1;
+    else if (FT1 <= 0.01111)
+      tmp1 = -171;
+  } else if (FT1 <= 0.01245) {
+    if (FT1 == 0.01111)
+      tmp1 = -171;
+    else if (FT1 <= 0.01126)
+      tmp1 = -170.9;
+    else if (FT1 <= 0.0114)
+      tmp1 = -170.8;
+    else if (FT1 <= 0.01154)
+      tmp1 = -170.7;
+    else if (FT1 <= 0.01169)
+      tmp1 = -170.6;
+    else if (FT1 <= 0.01184)
+      tmp1 = -170.5;
+    else if (FT1 <= 0.01199)
+      tmp1 = -170.4;
+    else if (FT1 <= 0.01214)
+      tmp1 = -170.3;
+    else if (FT1 <= 0.01229)
+      tmp1 = -170.2;
+    else if (FT1 <= 0.01245)
+      tmp1 = -170.1;
+    else if (FT1 <= 0.0126)
+      tmp1 = -170;
+  } else if (FT1 <= 0.01409) {
+    if (FT1 == 0.0126)
+      tmp1 = -170;
+    else if (FT1 <= 0.01276)
+      tmp1 = -169.9;
+    else if (FT1 <= 0.01292)
+      tmp1 = -169.8;
+    else if (FT1 <= 0.01308)
+      tmp1 = -169.7;
+    else if (FT1 <= 0.01325)
+      tmp1 = -169.6;
+    else if (FT1 <= 0.01341)
+      tmp1 = -169.5;
+    else if (FT1 <= 0.01358)
+      tmp1 = -169.4;
+    else if (FT1 <= 0.01375)
+      tmp1 = -169.3;
+    else if (FT1 <= 0.01392)
+      tmp1 = -169.2;
+    else if (FT1 <= 0.01409)
+      tmp1 = -169.1;
+    else if (FT1 <= 0.01426)
+      tmp1 = -169;
+  } else if (FT1 <= 0.01591) {
+    if (FT1 == 0.01426)
+      tmp1 = -169;
+    else if (FT1 <= 0.01444)
+      tmp1 = -168.9;
+    else if (FT1 <= 0.01462)
+      tmp1 = -168.8;
+    else if (FT1 <= 0.0148)
+      tmp1 = -168.7;
+    else if (FT1 <= 0.01498)
+      tmp1 = -168.6;
+    else if (FT1 <= 0.01516)
+      tmp1 = -168.5;
+    else if (FT1 <= 0.01534)
+      tmp1 = -168.4;
+    else if (FT1 <= 0.01553)
+      tmp1 = -168.3;
+    else if (FT1 <= 0.01572)
+      tmp1 = -168.2;
+    else if (FT1 <= 0.01591)
+      tmp1 = -168.1;
+    else if (FT1 <= 0.0161)
+      tmp1 = -168;
+  } else if (FT1 <= 0.01793) {
+    if (FT1 == 0.0161)
+      tmp1 = -168;
+    else if (FT1 <= 0.0163)
+      tmp1 = -167.9;
+    else if (FT1 <= 0.01649)
+      tmp1 = -167.8;
+    else if (FT1 <= 0.01669)
+      tmp1 = -167.7;
+    else if (FT1 <= 0.01689)
+      tmp1 = -167.6;
+    else if (FT1 <= 0.0171)
+      tmp1 = -167.5;
+    else if (FT1 <= 0.0173)
+      tmp1 = -167.4;
+    else if (FT1 <= 0.01751)
+      tmp1 = -167.3;
+    else if (FT1 <= 0.01772)
+      tmp1 = -167.2;
+    else if (FT1 <= 0.01793)
+      tmp1 = -167.1;
+    else if (FT1 <= 0.01814)
+      tmp1 = -167;
+  } else if (FT1 <= 0.02016) {
+    if (FT1 == 0.01814)
+      tmp1 = -167;
+    else if (FT1 <= 0.01836)
+      tmp1 = -166.9;
+    else if (FT1 <= 0.01857)
+      tmp1 = -166.8;
+    else if (FT1 <= 0.01879)
+      tmp1 = -166.7;
+    else if (FT1 <= 0.01902)
+      tmp1 = -166.6;
+    else if (FT1 <= 0.01924)
+      tmp1 = -166.5;
+    else if (FT1 <= 0.01947)
+      tmp1 = -166.4;
+    else if (FT1 <= 0.0197)
+      tmp1 = -166.3;
+    else if (FT1 <= 0.01993)
+      tmp1 = -166.2;
+    else if (FT1 <= 0.02016)
+      tmp1 = -166.1;
+    else if (FT1 <= 0.02039)
+      tmp1 = -166;
+  } else if (FT1 <= 0.02262) {
+    if (FT1 == 0.02039)
+      tmp1 = -166;
+    else if (FT1 <= 0.02063)
+      tmp1 = -165.9;
+    else if (FT1 <= 0.02087)
+      tmp1 = -165.8;
+    else if (FT1 <= 0.02112)
+      tmp1 = -165.7;
+    else if (FT1 <= 0.02136)
+      tmp1 = -165.6;
+    else if (FT1 <= 0.02161)
+      tmp1 = -165.5;
+    else if (FT1 <= 0.02186)
+      tmp1 = -165.4;
+    else if (FT1 <= 0.02211)
+      tmp1 = -165.3;
+    else if (FT1 <= 0.02236)
+      tmp1 = -165.2;
+    else if (FT1 <= 0.02262)
+      tmp1 = -165.1;
+    else if (FT1 <= 0.02288)
+      tmp1 = -165;
+  } else if (FT1 <= 0.02533) {
+    if (FT1 == 0.02288)
+      tmp1 = -165;
+    else if (FT1 <= 0.02314)
+      tmp1 = -164.9;
+    else if (FT1 <= 0.02341)
+      tmp1 = -164.8;
+    else if (FT1 <= 0.02368)
+      tmp1 = -164.7;
+    else if (FT1 <= 0.02394)
+      tmp1 = -164.6;
+    else if (FT1 <= 0.02422)
+      tmp1 = -164.5;
+    else if (FT1 <= 0.02449)
+      tmp1 = -164.4;
+    else if (FT1 <= 0.02477)
+      tmp1 = -164.3;
+    else if (FT1 <= 0.02505)
+      tmp1 = -164.2;
+    else if (FT1 <= 0.02533)
+      tmp1 = -164.1;
+    else if (FT1 <= 0.02562)
+      tmp1 = -164;
+  } else if (FT1 <= 0.02832) {
+    if (FT1 == 0.02562)
+      tmp1 = -164;
+    else if (FT1 <= 0.02591)
+      tmp1 = -163.9;
+    else if (FT1 <= 0.0262)
+      tmp1 = -163.8;
+    else if (FT1 <= 0.02649)
+      tmp1 = -163.7;
+    else if (FT1 <= 0.02679)
+      tmp1 = -163.6;
+    else if (FT1 <= 0.02709)
+      tmp1 = -163.5;
+    else if (FT1 <= 0.02739)
+      tmp1 = -163.4;
+    else if (FT1 <= 0.0277)
+      tmp1 = -163.3;
+    else if (FT1 <= 0.028)
+      tmp1 = -163.2;
+    else if (FT1 <= 0.02832)
+      tmp1 = -163.1;
+    else if (FT1 <= 0.02863)
+      tmp1 = -163;
+  } else if (FT1 <= 0.03159) {
+    if (FT1 == 0.02863)
+      tmp1 = -163;
+    else if (FT1 <= 0.02895)
+      tmp1 = -162.9;
+    else if (FT1 <= 0.02927)
+      tmp1 = -162.8;
+    else if (FT1 <= 0.02959)
+      tmp1 = -162.7;
+    else if (FT1 <= 0.02991)
+      tmp1 = -162.6;
+    else if (FT1 <= 0.03024)
+      tmp1 = -162.5;
+    else if (FT1 <= 0.03057)
+      tmp1 = -162.4;
+    else if (FT1 <= 0.03091)
+      tmp1 = -162.3;
+    else if (FT1 <= 0.03125)
+      tmp1 = -162.2;
+    else if (FT1 <= 0.03159)
+      tmp1 = -162.1;
+    else if (FT1 <= 0.03193)
+      tmp1 = -162;
+  } else if (FT1 <= 0.03517) {
+    if (FT1 == 0.03193)
+      tmp1 = -162;
+    else if (FT1 <= 0.03228)
+      tmp1 = -161.9;
+    else if (FT1 <= 0.03263)
+      tmp1 = -161.8;
+    else if (FT1 <= 0.03298)
+      tmp1 = -161.7;
+    else if (FT1 <= 0.03334)
+      tmp1 = -161.6;
+    else if (FT1 <= 0.0337)
+      tmp1 = -161.5;
+    else if (FT1 <= 0.03406)
+      tmp1 = -161.4;
+    else if (FT1 <= 0.03443)
+      tmp1 = -161.3;
+    else if (FT1 <= 0.0348)
+      tmp1 = -161.2;
+    else if (FT1 <= 0.03517)
+      tmp1 = -161.1;
+    else if (FT1 <= 0.03555)
+      tmp1 = -161;
+  } else if (FT1 <= 0.0391) {
+    if (FT1 == 0.03555)
+      tmp1 = -161;
+    else if (FT1 <= 0.03593)
+      tmp1 = -160.9;
+    else if (FT1 <= 0.03631)
+      tmp1 = -160.8;
+    else if (FT1 <= 0.0367)
+      tmp1 = -160.7;
+    else if (FT1 <= 0.03709)
+      tmp1 = -160.6;
+    else if (FT1 <= 0.03749)
+      tmp1 = -160.5;
+    else if (FT1 <= 0.03788)
+      tmp1 = -160.4;
+    else if (FT1 <= 0.03828)
+      tmp1 = -160.3;
+    else if (FT1 <= 0.03869)
+      tmp1 = -160.2;
+    else if (FT1 <= 0.0391)
+      tmp1 = -160.1;
+    else if (FT1 <= 0.03951)
+      tmp1 = -160;
+  } else if (FT1 <= 0.04338) {
+    if (FT1 == 0.03951)
+      tmp1 = -160;
+    else if (FT1 <= 0.03992)
+      tmp1 = -159.9;
+    else if (FT1 <= 0.04034)
+      tmp1 = -159.8;
+    else if (FT1 <= 0.04076)
+      tmp1 = -159.7;
+    else if (FT1 <= 0.04119)
+      tmp1 = -159.6;
+    else if (FT1 <= 0.04162)
+      tmp1 = -159.5;
+    else if (FT1 <= 0.04206)
+      tmp1 = -159.4;
+    else if (FT1 <= 0.04249)
+      tmp1 = -159.3;
+    else if (FT1 <= 0.04293)
+      tmp1 = -159.2;
+    else if (FT1 <= 0.04338)
+      tmp1 = -159.1;
+    else if (FT1 <= 0.04383)
+      tmp1 = -159;
+  } else if (FT1 <= 0.04805) {
+    if (FT1 == 0.04383)
+      tmp1 = -159;
+    else if (FT1 <= 0.04428)
+      tmp1 = -158.9;
+    else if (FT1 <= 0.04474)
+      tmp1 = -158.8;
+    else if (FT1 <= 0.0452)
+      tmp1 = -158.7;
+    else if (FT1 <= 0.04566)
+      tmp1 = -158.6;
+    else if (FT1 <= 0.04613)
+      tmp1 = -158.5;
+    else if (FT1 <= 0.04661)
+      tmp1 = -158.4;
+    else if (FT1 <= 0.04708)
+      tmp1 = -158.3;
+    else if (FT1 <= 0.04756)
+      tmp1 = -158.2;
+    else if (FT1 <= 0.04805)
+      tmp1 = -158.1;
+    else if (FT1 <= 0.04854)
+      tmp1 = -158;
+  } else if (FT1 <= 0.05313) {
+    if (FT1 == 0.04854)
+      tmp1 = -158;
+    else if (FT1 <= 0.04903)
+      tmp1 = -157.9;
+    else if (FT1 <= 0.04953)
+      tmp1 = -157.8;
+    else if (FT1 <= 0.05003)
+      tmp1 = -157.7;
+    else if (FT1 <= 0.05054)
+      tmp1 = -157.6;
+    else if (FT1 <= 0.05105)
+      tmp1 = -157.5;
+    else if (FT1 <= 0.05156)
+      tmp1 = -157.4;
+    else if (FT1 <= 0.05208)
+      tmp1 = -157.3;
+    else if (FT1 <= 0.05261)
+      tmp1 = -157.2;
+    else if (FT1 <= 0.05313)
+      tmp1 = -157.1;
+    else if (FT1 <= 0.05367)
+      tmp1 = -157;
+  } else if (FT1 <= 0.05866) {
+    if (FT1 == 0.05367)
+      tmp1 = -157;
+    else if (FT1 <= 0.0542)
+      tmp1 = -156.9;
+    else if (FT1 <= 0.05474)
+      tmp1 = -156.8;
+    else if (FT1 <= 0.05529)
+      tmp1 = -156.7;
+    else if (FT1 <= 0.05584)
+      tmp1 = -156.6;
+    else if (FT1 <= 0.0564)
+      tmp1 = -156.5;
+    else if (FT1 <= 0.05696)
+      tmp1 = -156.4;
+    else if (FT1 <= 0.05752)
+      tmp1 = -156.3;
+    else if (FT1 <= 0.05809)
+      tmp1 = -156.2;
+    else if (FT1 <= 0.05866)
+      tmp1 = -156.1;
+    else if (FT1 <= 0.05924)
+      tmp1 = -156;
+  } else if (FT1 <= 0.06466) {
+    if (FT1 == 0.05924)
+      tmp1 = -156;
+    else if (FT1 <= 0.05982)
+      tmp1 = -155.9;
+    else if (FT1 <= 0.06041)
+      tmp1 = -155.8;
+    else if (FT1 <= 0.061)
+      tmp1 = -155.7;
+    else if (FT1 <= 0.0616)
+      tmp1 = -155.6;
+    else if (FT1 <= 0.0622)
+      tmp1 = -155.5;
+    else if (FT1 <= 0.06281)
+      tmp1 = -155.4;
+    else if (FT1 <= 0.06342)
+      tmp1 = -155.3;
+    else if (FT1 <= 0.06404)
+      tmp1 = -155.2;
+    else if (FT1 <= 0.06466)
+      tmp1 = -155.1;
+    else if (FT1 <= 0.06529)
+      tmp1 = -155;
+  } else if (FT1 <= 0.07116) {
+    if (FT1 == 0.06529)
+      tmp1 = -155;
+    else if (FT1 <= 0.06592)
+      tmp1 = -154.9;
+    else if (FT1 <= 0.06656)
+      tmp1 = -154.8;
+    else if (FT1 <= 0.0672)
+      tmp1 = -154.7;
+    else if (FT1 <= 0.06785)
+      tmp1 = -154.6;
+    else if (FT1 <= 0.0685)
+      tmp1 = -154.5;
+    else if (FT1 <= 0.06916)
+      tmp1 = -154.4;
+    else if (FT1 <= 0.06982)
+      tmp1 = -154.3;
+    else if (FT1 <= 0.07049)
+      tmp1 = -154.2;
+    else if (FT1 <= 0.07116)
+      tmp1 = -154.1;
+    else if (FT1 <= 0.07184)
+      tmp1 = -154;
+  } else if (FT1 <= 0.0782) {
+    if (FT1 == 0.07184)
+      tmp1 = -154;
+    else if (FT1 <= 0.07253)
+      tmp1 = -153.9;
+    else if (FT1 <= 0.07322)
+      tmp1 = -153.8;
+    else if (FT1 <= 0.07391)
+      tmp1 = -153.7;
+    else if (FT1 <= 0.07461)
+      tmp1 = -153.6;
+    else if (FT1 <= 0.07532)
+      tmp1 = -153.5;
+    else if (FT1 <= 0.07603)
+      tmp1 = -153.4;
+    else if (FT1 <= 0.07675)
+      tmp1 = -153.3;
+    else if (FT1 <= 0.07747)
+      tmp1 = -153.2;
+    else if (FT1 <= 0.0782)
+      tmp1 = -153.1;
+    else if (FT1 <= 0.07894)
+      tmp1 = -153;
+  } else if (FT1 <= 0.08581) {
+    if (FT1 == 0.07894)
+      tmp1 = -153;
+    else if (FT1 <= 0.07968)
+      tmp1 = -152.9;
+    else if (FT1 <= 0.08042)
+      tmp1 = -152.8;
+    else if (FT1 <= 0.08117)
+      tmp1 = -152.7;
+    else if (FT1 <= 0.08193)
+      tmp1 = -152.6;
+    else if (FT1 <= 0.08269)
+      tmp1 = -152.5;
+    else if (FT1 <= 0.08346)
+      tmp1 = -152.4;
+    else if (FT1 <= 0.08424)
+      tmp1 = -152.3;
+    else if (FT1 <= 0.08502)
+      tmp1 = -152.2;
+    else if (FT1 <= 0.08581)
+      tmp1 = -152.1;
+    else if (FT1 <= 0.0866)
+      tmp1 = -152;
+  } else if (FT1 <= 0.09402) {
+    if (FT1 == 0.0866)
+      tmp1 = -152;
+    else if (FT1 <= 0.0874)
+      tmp1 = -151.9;
+    else if (FT1 <= 0.08821)
+      tmp1 = -151.8;
+    else if (FT1 <= 0.08902)
+      tmp1 = -151.7;
+    else if (FT1 <= 0.08984)
+      tmp1 = -151.6;
+    else if (FT1 <= 0.09066)
+      tmp1 = -151.5;
+    else if (FT1 <= 0.09149)
+      tmp1 = -151.4;
+    else if (FT1 <= 0.09233)
+      tmp1 = -151.3;
+    else if (FT1 <= 0.09317)
+      tmp1 = -151.2;
+    else if (FT1 <= 0.09402)
+      tmp1 = -151.1;
+    else if (FT1 <= 0.09488)
+      tmp1 = -151;
+  } else if (FT1 <= 0.10287) {
+    if (FT1 == 0.09488)
+      tmp1 = -151;
+    else if (FT1 <= 0.09574)
+      tmp1 = -150.9;
+    else if (FT1 <= 0.09661)
+      tmp1 = -150.8;
+    else if (FT1 <= 0.09748)
+      tmp1 = -150.7;
+    else if (FT1 <= 0.09836)
+      tmp1 = -150.6;
+    else if (FT1 <= 0.09925)
+      tmp1 = -150.5;
+    else if (FT1 <= 0.10015)
+      tmp1 = -150.4;
+    else if (FT1 <= 0.10105)
+      tmp1 = -150.3;
+    else if (FT1 <= 0.10196)
+      tmp1 = -150.2;
+    else if (FT1 <= 0.10287)
+      tmp1 = -150.1;
+    else if (FT1 <= 0.10379)
+      tmp1 = -150;
+  } else if (FT1 <= 0.1124) {
+    if (FT1 == 0.10379)
+      tmp1 = -150;
+    else if (FT1 <= 0.10472)
+      tmp1 = -149.9;
+    else if (FT1 <= 0.10566)
+      tmp1 = -149.8;
+    else if (FT1 <= 0.1066)
+      tmp1 = -149.7;
+    else if (FT1 <= 0.10755)
+      tmp1 = -149.6;
+    else if (FT1 <= 0.10851)
+      tmp1 = -149.5;
+    else if (FT1 <= 0.10947)
+      tmp1 = -149.4;
+    else if (FT1 <= 0.11044)
+      tmp1 = -149.3;
+    else if (FT1 <= 0.11142)
+      tmp1 = -149.2;
+    else if (FT1 <= 0.1124)
+      tmp1 = -149.1;
+    else if (FT1 <= 0.11339)
+      tmp1 = -149;
+  } else if (FT1 <= 0.12265) {
+    if (FT1 == 0.11339)
+      tmp1 = -149;
+    else if (FT1 <= 0.11439)
+      tmp1 = -148.9;
+    else if (FT1 <= 0.1154)
+      tmp1 = -148.8;
+    else if (FT1 <= 0.11641)
+      tmp1 = -148.7;
+    else if (FT1 <= 0.11744)
+      tmp1 = -148.6;
+    else if (FT1 <= 0.11846)
+      tmp1 = -148.5;
+    else if (FT1 <= 0.1195)
+      tmp1 = -148.4;
+    else if (FT1 <= 0.12054)
+      tmp1 = -148.3;
+    else if (FT1 <= 0.12159)
+      tmp1 = -148.2;
+    else if (FT1 <= 0.12265)
+      tmp1 = -148.1;
+    else if (FT1 <= 0.12372)
+      tmp1 = -148;
+  } else if (FT1 <= 0.13366) {
+    if (FT1 == 0.12372)
+      tmp1 = -148;
+    else if (FT1 <= 0.12479)
+      tmp1 = -147.9;
+    else if (FT1 <= 0.12587)
+      tmp1 = -147.8;
+    else if (FT1 <= 0.12696)
+      tmp1 = -147.7;
+    else if (FT1 <= 0.12806)
+      tmp1 = -147.6;
+    else if (FT1 <= 0.12916)
+      tmp1 = -147.5;
+    else if (FT1 <= 0.13028)
+      tmp1 = -147.4;
+    else if (FT1 <= 0.1314)
+      tmp1 = -147.3;
+    else if (FT1 <= 0.13252)
+      tmp1 = -147.2;
+    else if (FT1 <= 0.13366)
+      tmp1 = -147.1;
+    else if (FT1 <= 0.1348)
+      tmp1 = -147;
+  } else if (FT1 <= 0.14547) {
+    if (FT1 == 0.1348)
+      tmp1 = -147;
+    else if (FT1 <= 0.13596)
+      tmp1 = -146.9;
+    else if (FT1 <= 0.13712)
+      tmp1 = -146.8;
+    else if (FT1 <= 0.13829)
+      tmp1 = -146.7;
+    else if (FT1 <= 0.13946)
+      tmp1 = -146.6;
+    else if (FT1 <= 0.14065)
+      tmp1 = -146.5;
+    else if (FT1 <= 0.14184)
+      tmp1 = -146.4;
+    else if (FT1 <= 0.14304)
+      tmp1 = -146.3;
+    else if (FT1 <= 0.14425)
+      tmp1 = -146.2;
+    else if (FT1 <= 0.14547)
+      tmp1 = -146.1;
+    else if (FT1 <= 0.1467)
+      tmp1 = -146;
+  } else if (FT1 <= 0.15813) {
+    if (FT1 == 0.1467)
+      tmp1 = -146;
+    else if (FT1 <= 0.14793)
+      tmp1 = -145.9;
+    else if (FT1 <= 0.14918)
+      tmp1 = -145.8;
+    else if (FT1 <= 0.15043)
+      tmp1 = -145.7;
+    else if (FT1 <= 0.15169)
+      tmp1 = -145.6;
+    else if (FT1 <= 0.15296)
+      tmp1 = -145.5;
+    else if (FT1 <= 0.15424)
+      tmp1 = -145.4;
+    else if (FT1 <= 0.15553)
+      tmp1 = -145.3;
+    else if (FT1 <= 0.15682)
+      tmp1 = -145.2;
+    else if (FT1 <= 0.15813)
+      tmp1 = -145.1;
+    else if (FT1 <= 0.15944)
+      tmp1 = -145;
+  } else if (FT1 <= 0.17167) {
+    if (FT1 == 0.15944)
+      tmp1 = -145;
+    else if (FT1 <= 0.16076)
+      tmp1 = -144.9;
+    else if (FT1 <= 0.16209)
+      tmp1 = -144.8;
+    else if (FT1 <= 0.16343)
+      tmp1 = -144.7;
+    else if (FT1 <= 0.16478)
+      tmp1 = -144.6;
+    else if (FT1 <= 0.16614)
+      tmp1 = -144.5;
+    else if (FT1 <= 0.16751)
+      tmp1 = -144.4;
+    else if (FT1 <= 0.16889)
+      tmp1 = -144.3;
+    else if (FT1 <= 0.17028)
+      tmp1 = -144.2;
+    else if (FT1 <= 0.17167)
+      tmp1 = -144.1;
+    else if (FT1 <= 0.17308)
+      tmp1 = -144;
+  } else if (FT1 <= 0.18615) {
+    if (FT1 == 0.17308)
+      tmp1 = -144;
+    else if (FT1 <= 0.17449)
+      tmp1 = -143.9;
+    else if (FT1 <= 0.17592)
+      tmp1 = -143.8;
+    else if (FT1 <= 0.17735)
+      tmp1 = -143.7;
+    else if (FT1 <= 0.17879)
+      tmp1 = -143.6;
+    else if (FT1 <= 0.18025)
+      tmp1 = -143.5;
+    else if (FT1 <= 0.18171)
+      tmp1 = -143.4;
+    else if (FT1 <= 0.18318)
+      tmp1 = -143.3;
+    else if (FT1 <= 0.18466)
+      tmp1 = -143.2;
+    else if (FT1 <= 0.18615)
+      tmp1 = -143.1;
+    else if (FT1 <= 0.18766)
+      tmp1 = -143;
+  } else if (FT1 <= 0.20162) {
+    if (FT1 == 0.18766)
+      tmp1 = -143;
+    else if (FT1 <= 0.18917)
+      tmp1 = -142.9;
+    else if (FT1 <= 0.19069)
+      tmp1 = -142.8;
+    else if (FT1 <= 0.19222)
+      tmp1 = -142.7;
+    else if (FT1 <= 0.19376)
+      tmp1 = -142.6;
+    else if (FT1 <= 0.19531)
+      tmp1 = -142.5;
+    else if (FT1 <= 0.19688)
+      tmp1 = -142.4;
+    else if (FT1 <= 0.19845)
+      tmp1 = -142.3;
+    else if (FT1 <= 0.20003)
+      tmp1 = -142.2;
+    else if (FT1 <= 0.20162)
+      tmp1 = -142.1;
+    else if (FT1 <= 0.20323)
+      tmp1 = -142;
+  } else if (FT1 <= 0.21813) {
+    if (FT1 == 0.20323)
+      tmp1 = -142;
+    else if (FT1 <= 0.20484)
+      tmp1 = -141.9;
+    else if (FT1 <= 0.20646)
+      tmp1 = -141.8;
+    else if (FT1 <= 0.2081)
+      tmp1 = -141.7;
+    else if (FT1 <= 0.20974)
+      tmp1 = -141.6;
+    else if (FT1 <= 0.2114)
+      tmp1 = -141.5;
+    else if (FT1 <= 0.21306)
+      tmp1 = -141.4;
+    else if (FT1 <= 0.21474)
+      tmp1 = -141.3;
+    else if (FT1 <= 0.21643)
+      tmp1 = -141.2;
+    else if (FT1 <= 0.21813)
+      tmp1 = -141.1;
+    else if (FT1 <= 0.21984)
+      tmp1 = -141;
+  } else if (FT1 <= 0.23572) {
+    if (FT1 == 0.21984)
+      tmp1 = -141;
+    else if (FT1 <= 0.22156)
+      tmp1 = -140.9;
+    else if (FT1 <= 0.22329)
+      tmp1 = -140.8;
+    else if (FT1 <= 0.22503)
+      tmp1 = -140.7;
+    else if (FT1 <= 0.22678)
+      tmp1 = -140.6;
+    else if (FT1 <= 0.22855)
+      tmp1 = -140.5;
+    else if (FT1 <= 0.23032)
+      tmp1 = -140.4;
+    else if (FT1 <= 0.23211)
+      tmp1 = -140.3;
+    else if (FT1 <= 0.23391)
+      tmp1 = -140.2;
+    else if (FT1 <= 0.23572)
+      tmp1 = -140.1;
+    else if (FT1 <= 0.23754)
+      tmp1 = -140;
+  } else if (FT1 <= 0.25445) {
+    if (FT1 == 0.23754)
+      tmp1 = -140;
+    else if (FT1 <= 0.23937)
+      tmp1 = -139.9;
+    else if (FT1 <= 0.24121)
+      tmp1 = -139.8;
+    else if (FT1 <= 0.24307)
+      tmp1 = -139.7;
+    else if (FT1 <= 0.24493)
+      tmp1 = -139.6;
+    else if (FT1 <= 0.24681)
+      tmp1 = -139.5;
+    else if (FT1 <= 0.2487)
+      tmp1 = -139.4;
+    else if (FT1 <= 0.25061)
+      tmp1 = -139.3;
+    else if (FT1 <= 0.25252)
+      tmp1 = -139.2;
+    else if (FT1 <= 0.25445)
+      tmp1 = -139.1;
+    else if (FT1 <= 0.25638)
+      tmp1 = -139;
+  } else if (FT1 <= 0.27437) {
+    if (FT1 == 0.25638)
+      tmp1 = -139;
+    else if (FT1 <= 0.25833)
+      tmp1 = -138.9;
+    else if (FT1 <= 0.26029)
+      tmp1 = -138.8;
+    else if (FT1 <= 0.26227)
+      tmp1 = -138.7;
+    else if (FT1 <= 0.26425)
+      tmp1 = -138.6;
+    else if (FT1 <= 0.26625)
+      tmp1 = -138.5;
+    else if (FT1 <= 0.26826)
+      tmp1 = -138.4;
+    else if (FT1 <= 0.27029)
+      tmp1 = -138.3;
+    else if (FT1 <= 0.27232)
+      tmp1 = -138.2;
+    else if (FT1 <= 0.27437)
+      tmp1 = -138.1;
+    else if (FT1 <= 0.27643)
+      tmp1 = -138;
+  } else if (FT1 <= 0.29554) {
+    if (FT1 == 0.27643)
+      tmp1 = -138;
+    else if (FT1 <= 0.2785)
+      tmp1 = -137.9;
+    else if (FT1 <= 0.28059)
+      tmp1 = -137.8;
+    else if (FT1 <= 0.28268)
+      tmp1 = -137.7;
+    else if (FT1 <= 0.28479)
+      tmp1 = -137.6;
+    else if (FT1 <= 0.28692)
+      tmp1 = -137.5;
+    else if (FT1 <= 0.28905)
+      tmp1 = -137.4;
+    else if (FT1 <= 0.2912)
+      tmp1 = -137.3;
+    else if (FT1 <= 0.29336)
+      tmp1 = -137.2;
+    else if (FT1 <= 0.29554)
+      tmp1 = -137.1;
+    else if (FT1 <= 0.29773)
+      tmp1 = -137;
+  } else if (FT1 <= 0.31802) {
+    if (FT1 == 0.29773)
+      tmp1 = -137;
+    else if (FT1 <= 0.29993)
+      tmp1 = -136.9;
+    else if (FT1 <= 0.30214)
+      tmp1 = -136.8;
+    else if (FT1 <= 0.30437)
+      tmp1 = -136.7;
+    else if (FT1 <= 0.30661)
+      tmp1 = -136.6;
+    else if (FT1 <= 0.30887)
+      tmp1 = -136.5;
+    else if (FT1 <= 0.31113)
+      tmp1 = -136.4;
+    else if (FT1 <= 0.31341)
+      tmp1 = -136.3;
+    else if (FT1 <= 0.31571)
+      tmp1 = -136.2;
+    else if (FT1 <= 0.31802)
+      tmp1 = -136.1;
+    else if (FT1 <= 0.32034)
+      tmp1 = -136;
+  } else if (FT1 <= 0.34186) {
+    if (FT1 == 0.32034)
+      tmp1 = -136;
+    else if (FT1 <= 0.32267)
+      tmp1 = -135.9;
+    else if (FT1 <= 0.32502)
+      tmp1 = -135.8;
+    else if (FT1 <= 0.32739)
+      tmp1 = -135.7;
+    else if (FT1 <= 0.32976)
+      tmp1 = -135.6;
+    else if (FT1 <= 0.33216)
+      tmp1 = -135.5;
+    else if (FT1 <= 0.33456)
+      tmp1 = -135.4;
+    else if (FT1 <= 0.33698)
+      tmp1 = -135.3;
+    else if (FT1 <= 0.33941)
+      tmp1 = -135.2;
+    else if (FT1 <= 0.34186)
+      tmp1 = -135.1;
+    else if (FT1 <= 0.34432)
+      tmp1 = -135;
+  } else if (FT1 <= 0.36713) {
+    if (FT1 == 0.34432)
+      tmp1 = -135;
+    else if (FT1 <= 0.3468)
+      tmp1 = -134.9;
+    else if (FT1 <= 0.34929)
+      tmp1 = -134.8;
+    else if (FT1 <= 0.35179)
+      tmp1 = -134.7;
+    else if (FT1 <= 0.35431)
+      tmp1 = -134.6;
+    else if (FT1 <= 0.35685)
+      tmp1 = -134.5;
+    else if (FT1 <= 0.3594)
+      tmp1 = -134.4;
+    else if (FT1 <= 0.36196)
+      tmp1 = -134.3;
+    else if (FT1 <= 0.36454)
+      tmp1 = -134.2;
+    else if (FT1 <= 0.36713)
+      tmp1 = -134.1;
+    else if (FT1 <= 0.36974)
+      tmp1 = -134;
+  } else if (FT1 <= 0.39388) {
+    if (FT1 == 0.36974)
+      tmp1 = -134;
+    else if (FT1 <= 0.37236)
+      tmp1 = -133.9;
+    else if (FT1 <= 0.375)
+      tmp1 = -133.8;
+    else if (FT1 <= 0.37765)
+      tmp1 = -133.7;
+    else if (FT1 <= 0.38032)
+      tmp1 = -133.6;
+    else if (FT1 <= 0.383)
+      tmp1 = -133.5;
+    else if (FT1 <= 0.3857)
+      tmp1 = -133.4;
+    else if (FT1 <= 0.38841)
+      tmp1 = -133.3;
+    else if (FT1 <= 0.39114)
+      tmp1 = -133.2;
+    else if (FT1 <= 0.39388)
+      tmp1 = -133.1;
+    else if (FT1 <= 0.39664)
+      tmp1 = -133;
+  } else if (FT1 <= 0.42219) {
+    if (FT1 == 0.39664)
+      tmp1 = -133;
+    else if (FT1 <= 0.39942)
+      tmp1 = -132.9;
+    else if (FT1 <= 0.40221)
+      tmp1 = -132.8;
+    else if (FT1 <= 0.40502)
+      tmp1 = -132.7;
+    else if (FT1 <= 0.40784)
+      tmp1 = -132.6;
+    else if (FT1 <= 0.41068)
+      tmp1 = -132.5;
+    else if (FT1 <= 0.41353)
+      tmp1 = -132.4;
+    else if (FT1 <= 0.4164)
+      tmp1 = -132.3;
+    else if (FT1 <= 0.41929)
+      tmp1 = -132.2;
+    else if (FT1 <= 0.42219)
+      tmp1 = -132.1;
+    else if (FT1 <= 0.42511)
+      tmp1 = -132;
+  } else if (FT1 <= 0.45211) {
+    if (FT1 == 0.42511)
+      tmp1 = -132;
+    else if (FT1 <= 0.42804)
+      tmp1 = -131.9;
+    else if (FT1 <= 0.43099)
+      tmp1 = -131.8;
+    else if (FT1 <= 0.43396)
+      tmp1 = -131.7;
+    else if (FT1 <= 0.43694)
+      tmp1 = -131.6;
+    else if (FT1 <= 0.43994)
+      tmp1 = -131.5;
+    else if (FT1 <= 0.44296)
+      tmp1 = -131.4;
+    else if (FT1 <= 0.44599)
+      tmp1 = -131.3;
+    else if (FT1 <= 0.44904)
+      tmp1 = -131.2;
+    else if (FT1 <= 0.45211)
+      tmp1 = -131.1;
+    else if (FT1 <= 0.45519)
+      tmp1 = -131;
+  } else if (FT1 <= 0.48371) {
+    if (FT1 == 0.45519)
+      tmp1 = -131;
+    else if (FT1 <= 0.45829)
+      tmp1 = -130.9;
+    else if (FT1 <= 0.46141)
+      tmp1 = -130.8;
+    else if (FT1 <= 0.46455)
+      tmp1 = -130.7;
+    else if (FT1 <= 0.4677)
+      tmp1 = -130.6;
+    else if (FT1 <= 0.47087)
+      tmp1 = -130.5;
+    else if (FT1 <= 0.47405)
+      tmp1 = -130.4;
+    else if (FT1 <= 0.47725)
+      tmp1 = -130.3;
+    else if (FT1 <= 0.48047)
+      tmp1 = -130.2;
+    else if (FT1 <= 0.48371)
+      tmp1 = -130.1;
+    else if (FT1 <= 0.48697)
+      tmp1 = -130;
+  } else if (FT1 <= 0.51706) {
+    if (FT1 == 0.48697)
+      tmp1 = -130;
+    else if (FT1 <= 0.49024)
+      tmp1 = -129.9;
+    else if (FT1 <= 0.49353)
+      tmp1 = -129.8;
+    else if (FT1 <= 0.49684)
+      tmp1 = -129.7;
+    else if (FT1 <= 0.50016)
+      tmp1 = -129.6;
+    else if (FT1 <= 0.50351)
+      tmp1 = -129.5;
+    else if (FT1 <= 0.50687)
+      tmp1 = -129.4;
+    else if (FT1 <= 0.51025)
+      tmp1 = -129.3;
+    else if (FT1 <= 0.51365)
+      tmp1 = -129.2;
+    else if (FT1 <= 0.51706)
+      tmp1 = -129.1;
+    else if (FT1 <= 0.5205)
+      tmp1 = -129;
+  } else if (FT1 <= 0.55223) {
+    if (FT1 == 0.5205)
+      tmp1 = -129;
+    else if (FT1 <= 0.52395)
+      tmp1 = -128.9;
+    else if (FT1 <= 0.52742)
+      tmp1 = -128.8;
+    else if (FT1 <= 0.53091)
+      tmp1 = -128.7;
+    else if (FT1 <= 0.53441)
+      tmp1 = -128.6;
+    else if (FT1 <= 0.53794)
+      tmp1 = -128.5;
+    else if (FT1 <= 0.54148)
+      tmp1 = -128.4;
+    else if (FT1 <= 0.54505)
+      tmp1 = -128.3;
+    else if (FT1 <= 0.54863)
+      tmp1 = -128.2;
+    else if (FT1 <= 0.55223)
+      tmp1 = -128.1;
+    else if (FT1 <= 0.55585)
+      tmp1 = -128;
+  } else if (FT1 <= 0.58928) {
+    if (FT1 == 0.55585)
+      tmp1 = -128;
+    else if (FT1 <= 0.55949)
+      tmp1 = -127.9;
+    else if (FT1 <= 0.56314)
+      tmp1 = -127.8;
+    else if (FT1 <= 0.56682)
+      tmp1 = -127.7;
+    else if (FT1 <= 0.57052)
+      tmp1 = -127.6;
+    else if (FT1 <= 0.57423)
+      tmp1 = -127.5;
+    else if (FT1 <= 0.57797)
+      tmp1 = -127.4;
+    else if (FT1 <= 0.58172)
+      tmp1 = -127.3;
+    else if (FT1 <= 0.58549)
+      tmp1 = -127.2;
+    else if (FT1 <= 0.58928)
+      tmp1 = -127.1;
+    else if (FT1 <= 0.5931)
+      tmp1 = -127;
+  } else if (FT1 <= 0.6283) {
+    if (FT1 == 0.5931)
+      tmp1 = -127;
+    else if (FT1 <= 0.59693)
+      tmp1 = -126.9;
+    else if (FT1 <= 0.60078)
+      tmp1 = -126.8;
+    else if (FT1 <= 0.60465)
+      tmp1 = -126.7;
+    else if (FT1 <= 0.60854)
+      tmp1 = -126.6;
+    else if (FT1 <= 0.61245)
+      tmp1 = -126.5;
+    else if (FT1 <= 0.61638)
+      tmp1 = -126.4;
+    else if (FT1 <= 0.62033)
+      tmp1 = -126.3;
+    else if (FT1 <= 0.62431)
+      tmp1 = -126.2;
+    else if (FT1 <= 0.6283)
+      tmp1 = -126.1;
+    else if (FT1 <= 0.63231)
+      tmp1 = -126;
+  } else if (FT1 <= 0.66934) {
+    if (FT1 == 0.63231)
+      tmp1 = -126;
+    else if (FT1 <= 0.63634)
+      tmp1 = -125.9;
+    else if (FT1 <= 0.6404)
+      tmp1 = -125.8;
+    else if (FT1 <= 0.64447)
+      tmp1 = -125.7;
+    else if (FT1 <= 0.64856)
+      tmp1 = -125.6;
+    else if (FT1 <= 0.65268)
+      tmp1 = -125.5;
+    else if (FT1 <= 0.65681)
+      tmp1 = -125.4;
+    else if (FT1 <= 0.66097)
+      tmp1 = -125.3;
+    else if (FT1 <= 0.66515)
+      tmp1 = -125.2;
+    else if (FT1 <= 0.66934)
+      tmp1 = -125.1;
+    else if (FT1 <= 0.67356)
+      tmp1 = -125;
+  } else if (FT1 <= 0.7125) {
+    if (FT1 == 0.67356)
+      tmp1 = -125;
+    else if (FT1 <= 0.6778)
+      tmp1 = -124.9;
+    else if (FT1 <= 0.68207)
+      tmp1 = -124.8;
+    else if (FT1 <= 0.68635)
+      tmp1 = -124.7;
+    else if (FT1 <= 0.69065)
+      tmp1 = -124.6;
+    else if (FT1 <= 0.69498)
+      tmp1 = -124.5;
+    else if (FT1 <= 0.69933)
+      tmp1 = -124.4;
+    else if (FT1 <= 0.70369)
+      tmp1 = -124.3;
+    else if (FT1 <= 0.70809)
+      tmp1 = -124.2;
+    else if (FT1 <= 0.7125)
+      tmp1 = -124.1;
+    else if (FT1 <= 0.71693)
+      tmp1 = -124;
+  } else if (FT1 <= 0.75783) {
+    if (FT1 == 0.71693)
+      tmp1 = -124;
+    else if (FT1 <= 0.72139)
+      tmp1 = -123.9;
+    else if (FT1 <= 0.72587)
+      tmp1 = -123.8;
+    else if (FT1 <= 0.73037)
+      tmp1 = -123.7;
+    else if (FT1 <= 0.73489)
+      tmp1 = -123.6;
+    else if (FT1 <= 0.73943)
+      tmp1 = -123.5;
+    else if (FT1 <= 0.744)
+      tmp1 = -123.4;
+    else if (FT1 <= 0.74859)
+      tmp1 = -123.3;
+    else if (FT1 <= 0.7532)
+      tmp1 = -123.2;
+    else if (FT1 <= 0.75783)
+      tmp1 = -123.1;
+    else if (FT1 <= 0.76249)
+      tmp1 = -123;
+  } else if (FT1 <= 0.80543) {
+    if (FT1 == 0.76249)
+      tmp1 = -123;
+    else if (FT1 <= 0.76717)
+      tmp1 = -122.9;
+    else if (FT1 <= 0.77187)
+      tmp1 = -122.8;
+    else if (FT1 <= 0.7766)
+      tmp1 = -122.7;
+    else if (FT1 <= 0.78134)
+      tmp1 = -122.6;
+    else if (FT1 <= 0.78611)
+      tmp1 = -122.5;
+    else if (FT1 <= 0.79091)
+      tmp1 = -122.4;
+    else if (FT1 <= 0.79572)
+      tmp1 = -122.3;
+    else if (FT1 <= 0.80056)
+      tmp1 = -122.2;
+    else if (FT1 <= 0.80543)
+      tmp1 = -122.1;
+    else if (FT1 <= 0.81032)
+      tmp1 = -122;
+  } else if (FT1 <= 0.85536) {
+    if (FT1 == 0.81032)
+      tmp1 = -122;
+    else if (FT1 <= 0.81523)
+      tmp1 = -121.9;
+    else if (FT1 <= 0.82016)
+      tmp1 = -121.8;
+    else if (FT1 <= 0.82512)
+      tmp1 = -121.7;
+    else if (FT1 <= 0.8301)
+      tmp1 = -121.6;
+    else if (FT1 <= 0.8351)
+      tmp1 = -121.5;
+    else if (FT1 <= 0.84013)
+      tmp1 = -121.4;
+    else if (FT1 <= 0.84518)
+      tmp1 = -121.3;
+    else if (FT1 <= 0.85026)
+      tmp1 = -121.2;
+    else if (FT1 <= 0.85536)
+      tmp1 = -121.1;
+    else if (FT1 <= 0.86049)
+      tmp1 = -121;
+  } else if (FT1 <= 0.90771) {
+    if (FT1 == 0.86049)
+      tmp1 = -121;
+    else if (FT1 <= 0.86564)
+      tmp1 = -120.9;
+    else if (FT1 <= 0.87081)
+      tmp1 = -120.8;
+    else if (FT1 <= 0.87601)
+      tmp1 = -120.7;
+    else if (FT1 <= 0.88123)
+      tmp1 = -120.6;
+    else if (FT1 <= 0.88648)
+      tmp1 = -120.5;
+    else if (FT1 <= 0.89175)
+      tmp1 = -120.4;
+    else if (FT1 <= 0.89705)
+      tmp1 = -120.3;
+    else if (FT1 <= 0.90237)
+      tmp1 = -120.2;
+    else if (FT1 <= 0.90771)
+      tmp1 = -120.1;
+    else if (FT1 <= 0.91308)
+      tmp1 = -120;
+  } else if (FT1 <= 0.96256) {
+    if (FT1 == 0.91308)
+      tmp1 = -120;
+    else if (FT1 <= 0.91848)
+      tmp1 = -119.9;
+    else if (FT1 <= 0.9239)
+      tmp1 = -119.8;
+    else if (FT1 <= 0.92935)
+      tmp1 = -119.7;
+    else if (FT1 <= 0.93482)
+      tmp1 = -119.6;
+    else if (FT1 <= 0.94032)
+      tmp1 = -119.5;
+    else if (FT1 <= 0.94584)
+      tmp1 = -119.4;
+    else if (FT1 <= 0.95139)
+      tmp1 = -119.3;
+    else if (FT1 <= 0.95696)
+      tmp1 = -119.2;
+    else if (FT1 <= 0.96256)
+      tmp1 = -119.1;
+    else if (FT1 <= 0.96819)
+      tmp1 = -119;
+  } else if (FT1 <= 1.01999) {
+    if (FT1 == 0.96819)
+      tmp1 = -119;
+    else if (FT1 <= 0.97384)
+      tmp1 = -118.9;
+    else if (FT1 <= 0.97952)
+      tmp1 = -118.8;
+    else if (FT1 <= 0.98522)
+      tmp1 = -118.7;
+    else if (FT1 <= 0.99095)
+      tmp1 = -118.6;
+    else if (FT1 <= 0.99671)
+      tmp1 = -118.5;
+    else if (FT1 <= 1.00249)
+      tmp1 = -118.4;
+    else if (FT1 <= 1.0083)
+      tmp1 = -118.3;
+    else if (FT1 <= 1.01413)
+      tmp1 = -118.2;
+    else if (FT1 <= 1.01999)
+      tmp1 = -118.1;
+    else if (FT1 <= 1.02588)
+      tmp1 = -118;
+  } else if (FT1 <= 1.08009) {
+    if (FT1 == 1.02588)
+      tmp1 = -118;
+    else if (FT1 <= 1.0318)
+      tmp1 = -117.9;
+    else if (FT1 <= 1.03774)
+      tmp1 = -117.8;
+    else if (FT1 <= 1.04371)
+      tmp1 = -117.7;
+    else if (FT1 <= 1.0497)
+      tmp1 = -117.6;
+    else if (FT1 <= 1.05572)
+      tmp1 = -117.5;
+    else if (FT1 <= 1.06177)
+      tmp1 = -117.4;
+    else if (FT1 <= 1.06785)
+      tmp1 = -117.3;
+    else if (FT1 <= 1.07395)
+      tmp1 = -117.2;
+    else if (FT1 <= 1.08009)
+      tmp1 = -117.1;
+    else if (FT1 <= 1.08625)
+      tmp1 = -117;
+  } else if (FT1 <= 1.14293) {
+    if (FT1 == 1.08625)
+      tmp1 = -117;
+    else if (FT1 <= 1.09243)
+      tmp1 = -116.9;
+    else if (FT1 <= 1.09865)
+      tmp1 = -116.8;
+    else if (FT1 <= 1.10489)
+      tmp1 = -116.7;
+    else if (FT1 <= 1.11116)
+      tmp1 = -116.6;
+    else if (FT1 <= 1.11746)
+      tmp1 = -116.5;
+    else if (FT1 <= 1.12378)
+      tmp1 = -116.4;
+    else if (FT1 <= 1.13014)
+      tmp1 = -116.3;
+    else if (FT1 <= 1.13652)
+      tmp1 = -116.2;
+    else if (FT1 <= 1.14293)
+      tmp1 = -116.1;
+    else if (FT1 <= 1.14937)
+      tmp1 = -116;
+  } else if (FT1 <= 1.2086) {
+    if (FT1 == 1.14937)
+      tmp1 = -116;
+    else if (FT1 <= 1.15583)
+      tmp1 = -115.9;
+    else if (FT1 <= 1.16233)
+      tmp1 = -115.8;
+    else if (FT1 <= 1.16885)
+      tmp1 = -115.7;
+    else if (FT1 <= 1.17541)
+      tmp1 = -115.6;
+    else if (FT1 <= 1.18199)
+      tmp1 = -115.5;
+    else if (FT1 <= 1.1886)
+      tmp1 = -115.4;
+    else if (FT1 <= 1.19524)
+      tmp1 = -115.3;
+    else if (FT1 <= 1.20191)
+      tmp1 = -115.2;
+    else if (FT1 <= 1.2086)
+      tmp1 = -115.1;
+    else if (FT1 <= 1.21533)
+      tmp1 = -115;
+  } else if (FT1 <= 1.2772) {
+    if (FT1 == 1.21533)
+      tmp1 = -115;
+    else if (FT1 <= 1.22209)
+      tmp1 = -114.9;
+    else if (FT1 <= 1.22887)
+      tmp1 = -114.8;
+    else if (FT1 <= 1.23569)
+      tmp1 = -114.7;
+    else if (FT1 <= 1.24253)
+      tmp1 = -114.6;
+    else if (FT1 <= 1.24941)
+      tmp1 = -114.5;
+    else if (FT1 <= 1.25631)
+      tmp1 = -114.4;
+    else if (FT1 <= 1.26324)
+      tmp1 = -114.3;
+    else if (FT1 <= 1.27021)
+      tmp1 = -114.2;
+    else if (FT1 <= 1.2772)
+      tmp1 = -114.1;
+    else if (FT1 <= 1.28422)
+      tmp1 = -114;
+  } else if (FT1 <= 1.34881) {
+    if (FT1 == 1.28422)
+      tmp1 = -114;
+    else if (FT1 <= 1.29128)
+      tmp1 = -113.9;
+    else if (FT1 <= 1.29836)
+      tmp1 = -113.8;
+    else if (FT1 <= 1.30548)
+      tmp1 = -113.7;
+    else if (FT1 <= 1.31262)
+      tmp1 = -113.6;
+    else if (FT1 <= 1.3198)
+      tmp1 = -113.5;
+    else if (FT1 <= 1.327)
+      tmp1 = -113.4;
+    else if (FT1 <= 1.33424)
+      tmp1 = -113.3;
+    else if (FT1 <= 1.34151)
+      tmp1 = -113.2;
+    else if (FT1 <= 1.34881)
+      tmp1 = -113.1;
+    else if (FT1 <= 1.35614)
+      tmp1 = -113;
+  } else if (FT1 <= 1.42351) {
+    if (FT1 == 1.35614)
+      tmp1 = -113;
+    else if (FT1 <= 1.3635)
+      tmp1 = -112.9;
+    else if (FT1 <= 1.37089)
+      tmp1 = -112.8;
+    else if (FT1 <= 1.37831)
+      tmp1 = -112.7;
+    else if (FT1 <= 1.38576)
+      tmp1 = -112.6;
+    else if (FT1 <= 1.39325)
+      tmp1 = -112.5;
+    else if (FT1 <= 1.40077)
+      tmp1 = -112.4;
+    else if (FT1 <= 1.40832)
+      tmp1 = -112.3;
+    else if (FT1 <= 1.4159)
+      tmp1 = -112.2;
+    else if (FT1 <= 1.42351)
+      tmp1 = -112.1;
+    else if (FT1 <= 1.43115)
+      tmp1 = -112;
+  } else if (FT1 <= 1.5014) {
+    if (FT1 == 1.43115)
+      tmp1 = -112;
+    else if (FT1 <= 1.43883)
+      tmp1 = -111.9;
+    else if (FT1 <= 1.44654)
+      tmp1 = -111.8;
+    else if (FT1 <= 1.45428)
+      tmp1 = -111.7;
+    else if (FT1 <= 1.46205)
+      tmp1 = -111.6;
+    else if (FT1 <= 1.46985)
+      tmp1 = -111.5;
+    else if (FT1 <= 1.47769)
+      tmp1 = -111.4;
+    else if (FT1 <= 1.48556)
+      tmp1 = -111.3;
+    else if (FT1 <= 1.49346)
+      tmp1 = -111.2;
+    else if (FT1 <= 1.5014)
+      tmp1 = -111.1;
+    else if (FT1 <= 1.50937)
+      tmp1 = -111;
+  } else if (FT1 <= 1.58256) {
+    if (FT1 == 1.50937)
+      tmp1 = -111;
+    else if (FT1 <= 1.51737)
+      tmp1 = -110.9;
+    else if (FT1 <= 1.5254)
+      tmp1 = -110.8;
+    else if (FT1 <= 1.53347)
+      tmp1 = -110.7;
+    else if (FT1 <= 1.54157)
+      tmp1 = -110.6;
+    else if (FT1 <= 1.5497)
+      tmp1 = -110.5;
+    else if (FT1 <= 1.55786)
+      tmp1 = -110.4;
+    else if (FT1 <= 1.56606)
+      tmp1 = -110.3;
+    else if (FT1 <= 1.5743)
+      tmp1 = -110.2;
+    else if (FT1 <= 1.58256)
+      tmp1 = -110.1;
+    else if (FT1 <= 1.59087)
+      tmp1 = -110;
+  } else if (FT1 <= 1.6671) {
+    if (FT1 == 1.59087)
+      tmp1 = -110;
+    else if (FT1 <= 1.5992)
+      tmp1 = -109.9;
+    else if (FT1 <= 1.60757)
+      tmp1 = -109.8;
+    else if (FT1 <= 1.61597)
+      tmp1 = -109.7;
+    else if (FT1 <= 1.62441)
+      tmp1 = -109.6;
+    else if (FT1 <= 1.63288)
+      tmp1 = -109.5;
+    else if (FT1 <= 1.64138)
+      tmp1 = -109.4;
+    else if (FT1 <= 1.64992)
+      tmp1 = -109.3;
+    else if (FT1 <= 1.65849)
+      tmp1 = -109.2;
+    else if (FT1 <= 1.6671)
+      tmp1 = -109.1;
+    else if (FT1 <= 1.67574)
+      tmp1 = -109;
+  } else if (FT1 <= 1.7551) {
+    if (FT1 == 1.67574)
+      tmp1 = -109;
+    else if (FT1 <= 1.68442)
+      tmp1 = -108.9;
+    else if (FT1 <= 1.69313)
+      tmp1 = -108.8;
+    else if (FT1 <= 1.70188)
+      tmp1 = -108.7;
+    else if (FT1 <= 1.71066)
+      tmp1 = -108.6;
+    else if (FT1 <= 1.71948)
+      tmp1 = -108.5;
+    else if (FT1 <= 1.72833)
+      tmp1 = -108.4;
+    else if (FT1 <= 1.73722)
+      tmp1 = -108.3;
+    else if (FT1 <= 1.74614)
+      tmp1 = -108.2;
+    else if (FT1 <= 1.7551)
+      tmp1 = -108.1;
+    else if (FT1 <= 1.7641)
+      tmp1 = -108;
+  } else if (FT1 <= 1.84666) {
+    if (FT1 == 1.7641)
+      tmp1 = -108;
+    else if (FT1 <= 1.77312)
+      tmp1 = -107.9;
+    else if (FT1 <= 1.78219)
+      tmp1 = -107.8;
+    else if (FT1 <= 1.79129)
+      tmp1 = -107.7;
+    else if (FT1 <= 1.80043)
+      tmp1 = -107.6;
+    else if (FT1 <= 1.8096)
+      tmp1 = -107.5;
+    else if (FT1 <= 1.81881)
+      tmp1 = -107.4;
+    else if (FT1 <= 1.82806)
+      tmp1 = -107.3;
+    else if (FT1 <= 1.83734)
+      tmp1 = -107.2;
+    else if (FT1 <= 1.84666)
+      tmp1 = -107.1;
+    else if (FT1 <= 1.85601)
+      tmp1 = -107;
+  } else if (FT1 <= 1.94186) {
+    if (FT1 == 1.85601)
+      tmp1 = -107;
+    else if (FT1 <= 1.8654)
+      tmp1 = -106.9;
+    else if (FT1 <= 1.87483)
+      tmp1 = -106.8;
+    else if (FT1 <= 1.8843)
+      tmp1 = -106.7;
+    else if (FT1 <= 1.8938)
+      tmp1 = -106.6;
+    else if (FT1 <= 1.90334)
+      tmp1 = -106.5;
+    else if (FT1 <= 1.91291)
+      tmp1 = -106.4;
+    else if (FT1 <= 1.92253)
+      tmp1 = -106.3;
+    else if (FT1 <= 1.93218)
+      tmp1 = -106.2;
+    else if (FT1 <= 1.94186)
+      tmp1 = -106.1;
+    else if (FT1 <= 1.95159)
+      tmp1 = -106;
+  } else if (FT1 <= 2.04082) {
+    if (FT1 == 1.95159)
+      tmp1 = -106;
+    else if (FT1 <= 1.96135)
+      tmp1 = -105.9;
+    else if (FT1 <= 1.97115)
+      tmp1 = -105.8;
+    else if (FT1 <= 1.98099)
+      tmp1 = -105.7;
+    else if (FT1 <= 1.99087)
+      tmp1 = -105.6;
+    else if (FT1 <= 2.00078)
+      tmp1 = -105.5;
+    else if (FT1 <= 2.01073)
+      tmp1 = -105.4;
+    else if (FT1 <= 2.02072)
+      tmp1 = -105.3;
+    else if (FT1 <= 2.03075)
+      tmp1 = -105.2;
+    else if (FT1 <= 2.04082)
+      tmp1 = -105.1;
+    else if (FT1 <= 2.05092)
+      tmp1 = -105;
+  } else if (FT1 <= 2.14361) {
+    if (FT1 == 2.05092)
+      tmp1 = -105;
+    else if (FT1 <= 2.06106)
+      tmp1 = -104.9;
+    else if (FT1 <= 2.07125)
+      tmp1 = -104.8;
+    else if (FT1 <= 2.08147)
+      tmp1 = -104.7;
+    else if (FT1 <= 2.09173)
+      tmp1 = -104.6;
+    else if (FT1 <= 2.10203)
+      tmp1 = -104.5;
+    else if (FT1 <= 2.11236)
+      tmp1 = -104.4;
+    else if (FT1 <= 2.12274)
+      tmp1 = -104.3;
+    else if (FT1 <= 2.13316)
+      tmp1 = -104.2;
+    else if (FT1 <= 2.14361)
+      tmp1 = -104.1;
+    else if (FT1 <= 2.15411)
+      tmp1 = -104;
+  } else if (FT1 <= 2.25035) {
+    if (FT1 == 2.15411)
+      tmp1 = -104;
+    else if (FT1 <= 2.16464)
+      tmp1 = -103.9;
+    else if (FT1 <= 2.17521)
+      tmp1 = -103.8;
+    else if (FT1 <= 2.18583)
+      tmp1 = -103.7;
+    else if (FT1 <= 2.19648)
+      tmp1 = -103.6;
+    else if (FT1 <= 2.20717)
+      tmp1 = -103.5;
+    else if (FT1 <= 2.21791)
+      tmp1 = -103.4;
+    else if (FT1 <= 2.22868)
+      tmp1 = -103.3;
+    else if (FT1 <= 2.23949)
+      tmp1 = -103.2;
+    else if (FT1 <= 2.25035)
+      tmp1 = -103.1;
+    else if (FT1 <= 2.26124)
+      tmp1 = -103;
+  } else if (FT1 <= 2.36112) {
+    if (FT1 == 2.26124)
+      tmp1 = -103;
+    else if (FT1 <= 2.27217)
+      tmp1 = -102.9;
+    else if (FT1 <= 2.28315)
+      tmp1 = -102.8;
+    else if (FT1 <= 2.29416)
+      tmp1 = -102.7;
+    else if (FT1 <= 2.30522)
+      tmp1 = -102.6;
+    else if (FT1 <= 2.31632)
+      tmp1 = -102.5;
+    else if (FT1 <= 2.32746)
+      tmp1 = -102.4;
+    else if (FT1 <= 2.33863)
+      tmp1 = -102.3;
+    else if (FT1 <= 2.34985)
+      tmp1 = -102.2;
+    else if (FT1 <= 2.36112)
+      tmp1 = -102.1;
+    else if (FT1 <= 2.37242)
+      tmp1 = -102;
+  } else if (FT1 <= 2.47602) {
+    if (FT1 == 2.37242)
+      tmp1 = -102;
+    else if (FT1 <= 2.38376)
+      tmp1 = -101.9;
+    else if (FT1 <= 2.39515)
+      tmp1 = -101.8;
+    else if (FT1 <= 2.40658)
+      tmp1 = -101.7;
+    else if (FT1 <= 2.41805)
+      tmp1 = -101.6;
+    else if (FT1 <= 2.42956)
+      tmp1 = -101.5;
+    else if (FT1 <= 2.44111)
+      tmp1 = -101.4;
+    else if (FT1 <= 2.45271)
+      tmp1 = -101.3;
+    else if (FT1 <= 2.46434)
+      tmp1 = -101.2;
+    else if (FT1 <= 2.47602)
+      tmp1 = -101.1;
+    else if (FT1 <= 2.48774)
+      tmp1 = -101;
+  } else if (FT1 <= 2.59516) {
+    if (FT1 == 2.48774)
+      tmp1 = -101;
+    else if (FT1 <= 2.49951)
+      tmp1 = -100.9;
+    else if (FT1 <= 2.51132)
+      tmp1 = -100.8;
+    else if (FT1 <= 2.52317)
+      tmp1 = -100.7;
+    else if (FT1 <= 2.53506)
+      tmp1 = -100.6;
+    else if (FT1 <= 2.54699)
+      tmp1 = -100.5;
+    else if (FT1 <= 2.55897)
+      tmp1 = -100.4;
+    else if (FT1 <= 2.57099)
+      tmp1 = -100.3;
+    else if (FT1 <= 2.58306)
+      tmp1 = -100.2;
+    else if (FT1 <= 2.59516)
+      tmp1 = -100.1;
+    else if (FT1 <= 2.60731)
+      tmp1 = -100;
+  } else if (FT1 <= 2.71864) {
+    if (FT1 == 2.60731)
+      tmp1 = -100;
+    else if (FT1 <= 2.61951)
+      tmp1 = -99.9;
+    else if (FT1 <= 2.63175)
+      tmp1 = -99.8;
+    else if (FT1 <= 2.64403)
+      tmp1 = -99.7;
+    else if (FT1 <= 2.65635)
+      tmp1 = -99.6;
+    else if (FT1 <= 2.66872)
+      tmp1 = -99.5;
+    else if (FT1 <= 2.68114)
+      tmp1 = -99.4;
+    else if (FT1 <= 2.69359)
+      tmp1 = -99.3;
+    else if (FT1 <= 2.70609)
+      tmp1 = -99.2;
+    else if (FT1 <= 2.71864)
+      tmp1 = -99.1;
+    else if (FT1 <= 2.73123)
+      tmp1 = -99;
+  } else if (FT1 <= 2.84655) {
+    if (FT1 == 2.73123)
+      tmp1 = -99;
+    else if (FT1 <= 2.74386)
+      tmp1 = -98.9;
+    else if (FT1 <= 2.75654)
+      tmp1 = -98.8;
+    else if (FT1 <= 2.76926)
+      tmp1 = -98.7;
+    else if (FT1 <= 2.78203)
+      tmp1 = -98.6;
+    else if (FT1 <= 2.79485)
+      tmp1 = -98.5;
+    else if (FT1 <= 2.8077)
+      tmp1 = -98.4;
+    else if (FT1 <= 2.82061)
+      tmp1 = -98.3;
+    else if (FT1 <= 2.83356)
+      tmp1 = -98.2;
+    else if (FT1 <= 2.84655)
+      tmp1 = -98.1;
+    else if (FT1 <= 2.85959)
+      tmp1 = -98;
+  } else if (FT1 <= 2.97899) {
+    if (FT1 == 2.85959)
+      tmp1 = -98;
+    else if (FT1 <= 2.87267)
+      tmp1 = -97.9;
+    else if (FT1 <= 2.8858)
+      tmp1 = -97.8;
+    else if (FT1 <= 2.89898)
+      tmp1 = -97.7;
+    else if (FT1 <= 2.9122)
+      tmp1 = -97.6;
+    else if (FT1 <= 2.92546)
+      tmp1 = -97.5;
+    else if (FT1 <= 2.93878)
+      tmp1 = -97.4;
+    else if (FT1 <= 2.95214)
+      tmp1 = -97.3;
+    else if (FT1 <= 2.96554)
+      tmp1 = -97.2;
+    else if (FT1 <= 2.97899)
+      tmp1 = -97.1;
+    else if (FT1 <= 2.99249)
+      tmp1 = -97;
+  } else if (FT1 <= 3.11608) {
+    if (FT1 == 2.99249)
+      tmp1 = -97;
+    else if (FT1 <= 3.00604)
+      tmp1 = -96.9;
+    else if (FT1 <= 3.01963)
+      tmp1 = -96.8;
+    else if (FT1 <= 3.03326)
+      tmp1 = -96.7;
+    else if (FT1 <= 3.04695)
+      tmp1 = -96.6;
+    else if (FT1 <= 3.06068)
+      tmp1 = -96.5;
+    else if (FT1 <= 3.07446)
+      tmp1 = -96.4;
+    else if (FT1 <= 3.08828)
+      tmp1 = -96.3;
+    else if (FT1 <= 3.10216)
+      tmp1 = -96.2;
+    else if (FT1 <= 3.11608)
+      tmp1 = -96.1;
+    else if (FT1 <= 3.13004)
+      tmp1 = -96;
+  } else if (FT1 <= 3.2579) {
+    if (FT1 == 3.13004)
+      tmp1 = -96;
+    else if (FT1 <= 3.14406)
+      tmp1 = -95.9;
+    else if (FT1 <= 3.15812)
+      tmp1 = -95.8;
+    else if (FT1 <= 3.17223)
+      tmp1 = -95.7;
+    else if (FT1 <= 3.18639)
+      tmp1 = -95.6;
+    else if (FT1 <= 3.20059)
+      tmp1 = -95.5;
+    else if (FT1 <= 3.21485)
+      tmp1 = -95.4;
+    else if (FT1 <= 3.22915)
+      tmp1 = -95.3;
+    else if (FT1 <= 3.2435)
+      tmp1 = -95.2;
+    else if (FT1 <= 3.2579)
+      tmp1 = -95.1;
+    else if (FT1 <= 3.27234)
+      tmp1 = -95;
+  } else if (FT1 <= 3.40456) {
+    if (FT1 == 3.27234)
+      tmp1 = -95;
+    else if (FT1 <= 3.28684)
+      tmp1 = -94.9;
+    else if (FT1 <= 3.30138)
+      tmp1 = -94.8;
+    else if (FT1 <= 3.31597)
+      tmp1 = -94.7;
+    else if (FT1 <= 3.33062)
+      tmp1 = -94.6;
+    else if (FT1 <= 3.34531)
+      tmp1 = -94.5;
+    else if (FT1 <= 3.36005)
+      tmp1 = -94.4;
+    else if (FT1 <= 3.37483)
+      tmp1 = -94.3;
+    else if (FT1 <= 3.38967)
+      tmp1 = -94.2;
+    else if (FT1 <= 3.40456)
+      tmp1 = -94.1;
+    else if (FT1 <= 3.4195)
+      tmp1 = -94;
+  } else if (FT1 <= 3.55617) {
+    if (FT1 == 3.4195)
+      tmp1 = -94;
+    else if (FT1 <= 3.43448)
+      tmp1 = -93.9;
+    else if (FT1 <= 3.44952)
+      tmp1 = -93.8;
+    else if (FT1 <= 3.4646)
+      tmp1 = -93.7;
+    else if (FT1 <= 3.47974)
+      tmp1 = -93.6;
+    else if (FT1 <= 3.49492)
+      tmp1 = -93.5;
+    else if (FT1 <= 3.51016)
+      tmp1 = -93.4;
+    else if (FT1 <= 3.52544)
+      tmp1 = -93.3;
+    else if (FT1 <= 3.54078)
+      tmp1 = -93.2;
+    else if (FT1 <= 3.55617)
+      tmp1 = -93.1;
+    else if (FT1 <= 3.5716)
+      tmp1 = -93;
+  } else if (FT1 <= 3.71282) {
+    if (FT1 == 3.5716)
+      tmp1 = -93;
+    else if (FT1 <= 3.58709)
+      tmp1 = -92.9;
+    else if (FT1 <= 3.60263)
+      tmp1 = -92.8;
+    else if (FT1 <= 3.61822)
+      tmp1 = -92.7;
+    else if (FT1 <= 3.63385)
+      tmp1 = -92.6;
+    else if (FT1 <= 3.64955)
+      tmp1 = -92.5;
+    else if (FT1 <= 3.66529)
+      tmp1 = -92.4;
+    else if (FT1 <= 3.68108)
+      tmp1 = -92.3;
+    else if (FT1 <= 3.69692)
+      tmp1 = -92.2;
+    else if (FT1 <= 3.71282)
+      tmp1 = -92.1;
+    else if (FT1 <= 3.72877)
+      tmp1 = -92;
+  } else if (FT1 <= 3.87462) {
+    if (FT1 == 3.72877)
+      tmp1 = -92;
+    else if (FT1 <= 3.74476)
+      tmp1 = -91.9;
+    else if (FT1 <= 3.76082)
+      tmp1 = -91.8;
+    else if (FT1 <= 3.77692)
+      tmp1 = -91.7;
+    else if (FT1 <= 3.79307)
+      tmp1 = -91.6;
+    else if (FT1 <= 3.80928)
+      tmp1 = -91.5;
+    else if (FT1 <= 3.82554)
+      tmp1 = -91.4;
+    else if (FT1 <= 3.84185)
+      tmp1 = -91.3;
+    else if (FT1 <= 3.85821)
+      tmp1 = -91.2;
+    else if (FT1 <= 3.87462)
+      tmp1 = -91.1;
+    else if (FT1 <= 3.89109)
+      tmp1 = -91;
+  } else if (FT1 <= 4.04168) {
+    if (FT1 == 3.89109)
+      tmp1 = -91;
+    else if (FT1 <= 3.90761)
+      tmp1 = -90.9;
+    else if (FT1 <= 3.92419)
+      tmp1 = -90.8;
+    else if (FT1 <= 3.94081)
+      tmp1 = -90.7;
+    else if (FT1 <= 3.95749)
+      tmp1 = -90.6;
+    else if (FT1 <= 3.97422)
+      tmp1 = -90.5;
+    else if (FT1 <= 3.99101)
+      tmp1 = -90.4;
+    else if (FT1 <= 4.00785)
+      tmp1 = -90.3;
+    else if (FT1 <= 4.02474)
+      tmp1 = -90.2;
+    else if (FT1 <= 4.04168)
+      tmp1 = -90.1;
+    else if (FT1 <= 4.05868)
+      tmp1 = -90;
+  } else if (FT1 <= 4.2141) {
+    if (FT1 == 4.05868)
+      tmp1 = -90;
+    else if (FT1 <= 4.07574)
+      tmp1 = -89.9;
+    else if (FT1 <= 4.09284)
+      tmp1 = -89.8;
+    else if (FT1 <= 4.11)
+      tmp1 = -89.7;
+    else if (FT1 <= 4.12722)
+      tmp1 = -89.6;
+    else if (FT1 <= 4.14449)
+      tmp1 = -89.5;
+    else if (FT1 <= 4.16181)
+      tmp1 = -89.4;
+    else if (FT1 <= 4.17919)
+      tmp1 = -89.3;
+    else if (FT1 <= 4.19662)
+      tmp1 = -89.2;
+    else if (FT1 <= 4.2141)
+      tmp1 = -89.1;
+    else if (FT1 <= 4.23165)
+      tmp1 = -89;
+  } else if (FT1 <= 4.39199) {
+    if (FT1 == 4.23165)
+      tmp1 = -89;
+    else if (FT1 <= 4.24924)
+      tmp1 = -88.9;
+    else if (FT1 <= 4.26689)
+      tmp1 = -88.8;
+    else if (FT1 <= 4.2846)
+      tmp1 = -88.7;
+    else if (FT1 <= 4.30236)
+      tmp1 = -88.6;
+    else if (FT1 <= 4.32017)
+      tmp1 = -88.5;
+    else if (FT1 <= 4.33804)
+      tmp1 = -88.4;
+    else if (FT1 <= 4.35597)
+      tmp1 = -88.3;
+    else if (FT1 <= 4.37395)
+      tmp1 = -88.2;
+    else if (FT1 <= 4.39199)
+      tmp1 = -88.1;
+    else if (FT1 <= 4.41008)
+      tmp1 = -88;
+  } else if (FT1 <= 4.57544) {
+    if (FT1 == 4.41008)
+      tmp1 = -88;
+    else if (FT1 <= 4.42823)
+      tmp1 = -87.9;
+    else if (FT1 <= 4.44643)
+      tmp1 = -87.8;
+    else if (FT1 <= 4.4647)
+      tmp1 = -87.7;
+    else if (FT1 <= 4.48301)
+      tmp1 = -87.6;
+    else if (FT1 <= 4.50139)
+      tmp1 = -87.5;
+    else if (FT1 <= 4.51981)
+      tmp1 = -87.4;
+    else if (FT1 <= 4.5383)
+      tmp1 = -87.3;
+    else if (FT1 <= 4.55684)
+      tmp1 = -87.2;
+    else if (FT1 <= 4.57544)
+      tmp1 = -87.1;
+    else if (FT1 <= 4.5941)
+      tmp1 = -87;
+  } else if (FT1 <= 4.76457) {
+    if (FT1 == 4.5941)
+      tmp1 = -87;
+    else if (FT1 <= 4.61281)
+      tmp1 = -86.9;
+    else if (FT1 <= 4.63158)
+      tmp1 = -86.8;
+    else if (FT1 <= 4.65041)
+      tmp1 = -86.7;
+    else if (FT1 <= 4.66929)
+      tmp1 = -86.6;
+    else if (FT1 <= 4.68823)
+      tmp1 = -86.5;
+    else if (FT1 <= 4.70723)
+      tmp1 = -86.4;
+    else if (FT1 <= 4.72628)
+      tmp1 = -86.3;
+    else if (FT1 <= 4.7454)
+      tmp1 = -86.2;
+    else if (FT1 <= 4.76457)
+      tmp1 = -86.1;
+    else if (FT1 <= 4.7838)
+      tmp1 = -86;
+  } else if (FT1 <= 4.95947) {
+    if (FT1 == 4.7838)
+      tmp1 = -86;
+    else if (FT1 <= 4.80308)
+      tmp1 = -85.9;
+    else if (FT1 <= 4.82243)
+      tmp1 = -85.8;
+    else if (FT1 <= 4.84183)
+      tmp1 = -85.7;
+    else if (FT1 <= 4.86129)
+      tmp1 = -85.6;
+    else if (FT1 <= 4.88081)
+      tmp1 = -85.5;
+    else if (FT1 <= 4.90039)
+      tmp1 = -85.4;
+    else if (FT1 <= 4.92003)
+      tmp1 = -85.3;
+    else if (FT1 <= 4.93972)
+      tmp1 = -85.2;
+    else if (FT1 <= 4.95947)
+      tmp1 = -85.1;
+    else if (FT1 <= 4.97929)
+      tmp1 = -85;
+  } else if (FT1 <= 5.16027) {
+    if (FT1 == 4.97929)
+      tmp1 = -85;
+    else if (FT1 <= 4.99916)
+      tmp1 = -84.9;
+    else if (FT1 <= 5.01909)
+      tmp1 = -84.8;
+    else if (FT1 <= 5.03908)
+      tmp1 = -84.7;
+    else if (FT1 <= 5.05913)
+      tmp1 = -84.6;
+    else if (FT1 <= 5.07924)
+      tmp1 = -84.5;
+    else if (FT1 <= 5.0994)
+      tmp1 = -84.4;
+    else if (FT1 <= 5.11963)
+      tmp1 = -84.3;
+    else if (FT1 <= 5.13992)
+      tmp1 = -84.2;
+    else if (FT1 <= 5.16027)
+      tmp1 = -84.1;
+    else if (FT1 <= 5.18067)
+      tmp1 = -84;
+  } else if (FT1 <= 5.36705) {
+    if (FT1 == 5.18067)
+      tmp1 = -84;
+    else if (FT1 <= 5.20114)
+      tmp1 = -83.9;
+    else if (FT1 <= 5.22167)
+      tmp1 = -83.8;
+    else if (FT1 <= 5.24225)
+      tmp1 = -83.7;
+    else if (FT1 <= 5.2629)
+      tmp1 = -83.6;
+    else if (FT1 <= 5.28361)
+      tmp1 = -83.5;
+    else if (FT1 <= 5.30438)
+      tmp1 = -83.4;
+    else if (FT1 <= 5.32521)
+      tmp1 = -83.3;
+    else if (FT1 <= 5.3461)
+      tmp1 = -83.2;
+    else if (FT1 <= 5.36705)
+      tmp1 = -83.1;
+    else if (FT1 <= 5.38806)
+      tmp1 = -83;
+  } else if (FT1 <= 5.57992) {
+    if (FT1 == 5.38806)
+      tmp1 = -83;
+    else if (FT1 <= 5.40913)
+      tmp1 = -82.9;
+    else if (FT1 <= 5.43027)
+      tmp1 = -82.8;
+    else if (FT1 <= 5.45146)
+      tmp1 = -82.7;
+    else if (FT1 <= 5.47272)
+      tmp1 = -82.6;
+    else if (FT1 <= 5.49404)
+      tmp1 = -82.5;
+    else if (FT1 <= 5.51541)
+      tmp1 = -82.4;
+    else if (FT1 <= 5.53686)
+      tmp1 = -82.3;
+    else if (FT1 <= 5.55836)
+      tmp1 = -82.2;
+    else if (FT1 <= 5.57992)
+      tmp1 = -82.1;
+    else if (FT1 <= 5.60155)
+      tmp1 = -82;
+  } else if (FT1 <= 5.799) {
+    if (FT1 == 5.60155)
+      tmp1 = -82;
+    else if (FT1 <= 5.62324)
+      tmp1 = -81.9;
+    else if (FT1 <= 5.64499)
+      tmp1 = -81.8;
+    else if (FT1 <= 5.66681)
+      tmp1 = -81.7;
+    else if (FT1 <= 5.68868)
+      tmp1 = -81.6;
+    else if (FT1 <= 5.71062)
+      tmp1 = -81.5;
+    else if (FT1 <= 5.73262)
+      tmp1 = -81.4;
+    else if (FT1 <= 5.75469)
+      tmp1 = -81.3;
+    else if (FT1 <= 5.77681)
+      tmp1 = -81.2;
+    else if (FT1 <= 5.799)
+      tmp1 = -81.1;
+    else if (FT1 <= 5.82126)
+      tmp1 = -81;
+  } else if (FT1 <= 6.02439) {
+    if (FT1 == 5.82126)
+      tmp1 = -81;
+    else if (FT1 <= 5.84357)
+      tmp1 = -80.9;
+    else if (FT1 <= 5.86595)
+      tmp1 = -80.8;
+    else if (FT1 <= 5.88839)
+      tmp1 = -80.7;
+    else if (FT1 <= 5.9109)
+      tmp1 = -80.6;
+    else if (FT1 <= 5.93347)
+      tmp1 = -80.5;
+    else if (FT1 <= 5.9561)
+      tmp1 = -80.4;
+    else if (FT1 <= 5.9788)
+      tmp1 = -80.3;
+    else if (FT1 <= 6.00156)
+      tmp1 = -80.2;
+    else if (FT1 <= 6.02439)
+      tmp1 = -80.1;
+    else if (FT1 <= 6.04728)
+      tmp1 = -80;
+  } else if (FT1 <= 6.25619) {
+    if (FT1 == 6.04728)
+      tmp1 = -80;
+    else if (FT1 <= 6.07023)
+      tmp1 = -79.9;
+    else if (FT1 <= 6.09325)
+      tmp1 = -79.8;
+    else if (FT1 <= 6.11633)
+      tmp1 = -79.7;
+    else if (FT1 <= 6.13948)
+      tmp1 = -79.6;
+    else if (FT1 <= 6.16269)
+      tmp1 = -79.5;
+    else if (FT1 <= 6.18597)
+      tmp1 = -79.4;
+    else if (FT1 <= 6.20931)
+      tmp1 = -79.3;
+    else if (FT1 <= 6.23272)
+      tmp1 = -79.2;
+    else if (FT1 <= 6.25619)
+      tmp1 = -79.1;
+    else if (FT1 <= 6.27972)
+      tmp1 = -79;
+  } else if (FT1 <= 6.49451) {
+    if (FT1 == 6.27972)
+      tmp1 = -79;
+    else if (FT1 <= 6.30333)
+      tmp1 = -78.9;
+    else if (FT1 <= 6.32699)
+      tmp1 = -78.8;
+    else if (FT1 <= 6.35073)
+      tmp1 = -78.7;
+    else if (FT1 <= 6.37453)
+      tmp1 = -78.6;
+    else if (FT1 <= 6.39839)
+      tmp1 = -78.5;
+    else if (FT1 <= 6.42232)
+      tmp1 = -78.4;
+    else if (FT1 <= 6.44632)
+      tmp1 = -78.3;
+    else if (FT1 <= 6.47038)
+      tmp1 = -78.2;
+    else if (FT1 <= 6.49451)
+      tmp1 = -78.1;
+    else if (FT1 <= 6.5187)
+      tmp1 = -78;
+  } else if (FT1 <= 6.73945) {
+    if (FT1 == 6.5187)
+      tmp1 = -78;
+    else if (FT1 <= 6.54296)
+      tmp1 = -77.9;
+    else if (FT1 <= 6.56729)
+      tmp1 = -77.8;
+    else if (FT1 <= 6.59168)
+      tmp1 = -77.7;
+    else if (FT1 <= 6.61614)
+      tmp1 = -77.6;
+    else if (FT1 <= 6.64067)
+      tmp1 = -77.5;
+    else if (FT1 <= 6.66526)
+      tmp1 = -77.4;
+    else if (FT1 <= 6.68992)
+      tmp1 = -77.3;
+    else if (FT1 <= 6.71465)
+      tmp1 = -77.2;
+    else if (FT1 <= 6.73945)
+      tmp1 = -77.1;
+    else if (FT1 <= 6.76431)
+      tmp1 = -77;
+  } else if (FT1 <= 6.99112) {
+    if (FT1 == 6.76431)
+      tmp1 = -77;
+    else if (FT1 <= 6.78924)
+      tmp1 = -76.9;
+    else if (FT1 <= 6.81424)
+      tmp1 = -76.8;
+    else if (FT1 <= 6.8393)
+      tmp1 = -76.7;
+    else if (FT1 <= 6.86443)
+      tmp1 = -76.6;
+    else if (FT1 <= 6.88963)
+      tmp1 = -76.5;
+    else if (FT1 <= 6.9149)
+      tmp1 = -76.4;
+    else if (FT1 <= 6.94024)
+      tmp1 = -76.3;
+    else if (FT1 <= 6.96564)
+      tmp1 = -76.2;
+    else if (FT1 <= 6.99112)
+      tmp1 = -76.1;
+    else if (FT1 <= 7.01666)
+      tmp1 = -76;
+  } else if (FT1 <= 7.24962) {
+    if (FT1 == 7.01666)
+      tmp1 = -76;
+    else if (FT1 <= 7.04227)
+      tmp1 = -75.9;
+    else if (FT1 <= 7.06795)
+      tmp1 = -75.8;
+    else if (FT1 <= 7.09369)
+      tmp1 = -75.7;
+    else if (FT1 <= 7.11951)
+      tmp1 = -75.6;
+    else if (FT1 <= 7.14539)
+      tmp1 = -75.5;
+    else if (FT1 <= 7.17135)
+      tmp1 = -75.4;
+    else if (FT1 <= 7.19737)
+      tmp1 = -75.3;
+    else if (FT1 <= 7.22346)
+      tmp1 = -75.2;
+    else if (FT1 <= 7.24962)
+      tmp1 = -75.1;
+    else if (FT1 <= 7.27585)
+      tmp1 = -75;
+  } else if (FT1 <= 7.51507) {
+    if (FT1 == 7.27585)
+      tmp1 = -75;
+    else if (FT1 <= 7.30215)
+      tmp1 = -74.9;
+    else if (FT1 <= 7.32852)
+      tmp1 = -74.8;
+    else if (FT1 <= 7.35496)
+      tmp1 = -74.7;
+    else if (FT1 <= 7.38147)
+      tmp1 = -74.6;
+    else if (FT1 <= 7.40805)
+      tmp1 = -74.5;
+    else if (FT1 <= 7.4347)
+      tmp1 = -74.4;
+    else if (FT1 <= 7.46142)
+      tmp1 = -74.3;
+    else if (FT1 <= 7.48821)
+      tmp1 = -74.2;
+    else if (FT1 <= 7.51507)
+      tmp1 = -74.1;
+    else if (FT1 <= 7.542)
+      tmp1 = -74;
+  } else if (FT1 <= 7.78756) {
+    if (FT1 == 7.542)
+      tmp1 = -74;
+    else if (FT1 <= 7.569)
+      tmp1 = -73.9;
+    else if (FT1 <= 7.59607)
+      tmp1 = -73.8;
+    else if (FT1 <= 7.62322)
+      tmp1 = -73.7;
+    else if (FT1 <= 7.65043)
+      tmp1 = -73.6;
+    else if (FT1 <= 7.67771)
+      tmp1 = -73.5;
+    else if (FT1 <= 7.70507)
+      tmp1 = -73.4;
+    else if (FT1 <= 7.73249)
+      tmp1 = -73.3;
+    else if (FT1 <= 7.75999)
+      tmp1 = -73.2;
+    else if (FT1 <= 7.78756)
+      tmp1 = -73.1;
+    else if (FT1 <= 7.8152)
+      tmp1 = -73;
+  } else if (FT1 <= 8.0672) {
+    if (FT1 == 7.8152)
+      tmp1 = -73;
+    else if (FT1 <= 7.84292)
+      tmp1 = -72.9;
+    else if (FT1 <= 7.8707)
+      tmp1 = -72.8;
+    else if (FT1 <= 7.89855)
+      tmp1 = -72.7;
+    else if (FT1 <= 7.92648)
+      tmp1 = -72.6;
+    else if (FT1 <= 7.95448)
+      tmp1 = -72.5;
+    else if (FT1 <= 7.98255)
+      tmp1 = -72.4;
+    else if (FT1 <= 8.0107)
+      tmp1 = -72.3;
+    else if (FT1 <= 8.03892)
+      tmp1 = -72.2;
+    else if (FT1 <= 8.0672)
+      tmp1 = -72.1;
+    else if (FT1 <= 8.09557)
+      tmp1 = -72;
+  } else if (FT1 <= 8.3541) {
+    if (FT1 == 8.09557)
+      tmp1 = -72;
+    else if (FT1 <= 8.124)
+      tmp1 = -71.9;
+    else if (FT1 <= 8.15251)
+      tmp1 = -71.8;
+    else if (FT1 <= 8.18109)
+      tmp1 = -71.7;
+    else if (FT1 <= 8.20974)
+      tmp1 = -71.6;
+    else if (FT1 <= 8.23846)
+      tmp1 = -71.5;
+    else if (FT1 <= 8.26726)
+      tmp1 = -71.4;
+    else if (FT1 <= 8.29614)
+      tmp1 = -71.3;
+    else if (FT1 <= 8.32508)
+      tmp1 = -71.2;
+    else if (FT1 <= 8.3541)
+      tmp1 = -71.1;
+    else if (FT1 <= 8.38319)
+      tmp1 = -71;
+  } else if (FT1 <= 8.64836) {
+    if (FT1 == 8.38319)
+      tmp1 = -71;
+    else if (FT1 <= 8.41236)
+      tmp1 = -70.9;
+    else if (FT1 <= 8.4416)
+      tmp1 = -70.8;
+    else if (FT1 <= 8.47091)
+      tmp1 = -70.7;
+    else if (FT1 <= 8.5003)
+      tmp1 = -70.6;
+    else if (FT1 <= 8.52976)
+      tmp1 = -70.5;
+    else if (FT1 <= 8.5593)
+      tmp1 = -70.4;
+    else if (FT1 <= 8.58891)
+      tmp1 = -70.3;
+    else if (FT1 <= 8.6186)
+      tmp1 = -70.2;
+    else if (FT1 <= 8.64836)
+      tmp1 = -70.1;
+    else if (FT1 <= 8.67819)
+      tmp1 = -70;
+  } else if (FT1 <= 8.95008) {
+    if (FT1 == 8.67819)
+      tmp1 = -70;
+    else if (FT1 <= 8.7081)
+      tmp1 = -69.9;
+    else if (FT1 <= 8.73808)
+      tmp1 = -69.8;
+    else if (FT1 <= 8.76814)
+      tmp1 = -69.7;
+    else if (FT1 <= 8.79828)
+      tmp1 = -69.6;
+    else if (FT1 <= 8.82849)
+      tmp1 = -69.5;
+    else if (FT1 <= 8.85877)
+      tmp1 = -69.4;
+    else if (FT1 <= 8.88913)
+      tmp1 = -69.3;
+    else if (FT1 <= 8.91957)
+      tmp1 = -69.2;
+    else if (FT1 <= 8.95008)
+      tmp1 = -69.1;
+    else if (FT1 <= 8.98066)
+      tmp1 = -69;
+  } else if (FT1 <= 9.25936) {
+    if (FT1 == 8.98066)
+      tmp1 = -69;
+    else if (FT1 <= 9.01132)
+      tmp1 = -68.9;
+    else if (FT1 <= 9.04206)
+      tmp1 = -68.8;
+    else if (FT1 <= 9.07288)
+      tmp1 = -68.7;
+    else if (FT1 <= 9.10377)
+      tmp1 = -68.6;
+    else if (FT1 <= 9.13473)
+      tmp1 = -68.5;
+    else if (FT1 <= 9.16578)
+      tmp1 = -68.4;
+    else if (FT1 <= 9.19689)
+      tmp1 = -68.3;
+    else if (FT1 <= 9.22809)
+      tmp1 = -68.2;
+    else if (FT1 <= 9.25936)
+      tmp1 = -68.1;
+    else if (FT1 <= 9.29071)
+      tmp1 = -68;
+  } else if (FT1 <= 9.57632) {
+    if (FT1 == 9.29071)
+      tmp1 = -68;
+    else if (FT1 <= 9.32214)
+      tmp1 = -67.9;
+    else if (FT1 <= 9.35364)
+      tmp1 = -67.8;
+    else if (FT1 <= 9.38522)
+      tmp1 = -67.7;
+    else if (FT1 <= 9.41688)
+      tmp1 = -67.6;
+    else if (FT1 <= 9.44861)
+      tmp1 = -67.5;
+    else if (FT1 <= 9.48042)
+      tmp1 = -67.4;
+    else if (FT1 <= 9.51231)
+      tmp1 = -67.3;
+    else if (FT1 <= 9.54428)
+      tmp1 = -67.2;
+    else if (FT1 <= 9.57632)
+      tmp1 = -67.1;
+    else if (FT1 <= 9.60844)
+      tmp1 = -67;
+  } else if (FT1 <= 9.90105) {
+    if (FT1 == 9.60844)
+      tmp1 = -67;
+    else if (FT1 <= 9.64064)
+      tmp1 = -66.9;
+    else if (FT1 <= 9.67292)
+      tmp1 = -66.8;
+    else if (FT1 <= 9.70527)
+      tmp1 = -66.7;
+    else if (FT1 <= 9.73771)
+      tmp1 = -66.6;
+    else if (FT1 <= 9.77022)
+      tmp1 = -66.5;
+    else if (FT1 <= 9.80281)
+      tmp1 = -66.4;
+    else if (FT1 <= 9.83548)
+      tmp1 = -66.3;
+    else if (FT1 <= 9.86822)
+      tmp1 = -66.2;
+    else if (FT1 <= 9.90105)
+      tmp1 = -66.1;
+    else if (FT1 <= 9.93395)
+      tmp1 = -66;
+  } else if (FT1 <= 10.2337) {
+    if (FT1 == 9.93395)
+      tmp1 = -66;
+    else if (FT1 <= 9.96694)
+      tmp1 = -65.9;
+    else if (FT1 <= 10)
+      tmp1 = -65.8;
+    else if (FT1 <= 10.0331)
+      tmp1 = -65.7;
+    else if (FT1 <= 10.0664)
+      tmp1 = -65.6;
+    else if (FT1 <= 10.0997)
+      tmp1 = -65.5;
+    else if (FT1 <= 10.133)
+      tmp1 = -65.4;
+    else if (FT1 <= 10.1665)
+      tmp1 = -65.3;
+    else if (FT1 <= 10.2)
+      tmp1 = -65.2;
+    else if (FT1 <= 10.2337)
+      tmp1 = -65.1;
+    else if (FT1 <= 10.2674)
+      tmp1 = -65;
+  } else if (FT1 <= 10.5742) {
+    if (FT1 == 10.2674)
+      tmp1 = -65;
+    else if (FT1 <= 10.3011)
+      tmp1 = -64.9;
+    else if (FT1 <= 10.335)
+      tmp1 = -64.8;
+    else if (FT1 <= 10.3689)
+      tmp1 = -64.7;
+    else if (FT1 <= 10.403)
+      tmp1 = -64.6;
+    else if (FT1 <= 10.437)
+      tmp1 = -64.5;
+    else if (FT1 <= 10.4712)
+      tmp1 = -64.4;
+    else if (FT1 <= 10.5055)
+      tmp1 = -64.3;
+    else if (FT1 <= 10.5398)
+      tmp1 = -64.2;
+    else if (FT1 <= 10.5742)
+      tmp1 = -64.1;
+    else if (FT1 <= 10.6087)
+      tmp1 = -64;
+  } else if (FT1 <= 10.9229) {
+    if (FT1 == 10.6087)
+      tmp1 = -64;
+    else if (FT1 <= 10.6433)
+      tmp1 = -63.9;
+    else if (FT1 <= 10.678)
+      tmp1 = -63.8;
+    else if (FT1 <= 10.7127)
+      tmp1 = -63.7;
+    else if (FT1 <= 10.7476)
+      tmp1 = -63.6;
+    else if (FT1 <= 10.7825)
+      tmp1 = -63.5;
+    else if (FT1 <= 10.8175)
+      tmp1 = -63.4;
+    else if (FT1 <= 10.8525)
+      tmp1 = -63.3;
+    else if (FT1 <= 10.8877)
+      tmp1 = -63.2;
+    else if (FT1 <= 10.9229)
+      tmp1 = -63.1;
+  } else if (FT1 <= 11.2798) {
+    if (FT1 == 10.9582)
+      tmp1 = -63;
+    else if (FT1 <= 10.9936)
+      tmp1 = -62.9;
+    else if (FT1 <= 11.0291)
+      tmp1 = -62.8;
+    else if (FT1 <= 11.0647)
+      tmp1 = -62.7;
+    else if (FT1 <= 11.1003)
+      tmp1 = -62.6;
+    else if (FT1 <= 11.136)
+      tmp1 = -62.5;
+    else if (FT1 <= 11.1718)
+      tmp1 = -62.4;
+    else if (FT1 <= 11.2077)
+      tmp1 = -62.3;
+    else if (FT1 <= 11.2437)
+      tmp1 = -62.2;
+    else if (FT1 <= 11.2798)
+      tmp1 = -62.1;
+  } else if (FT1 <= 11.6449) {
+    if (FT1 == 11.3159)
+      tmp1 = -62;
+    else if (FT1 <= 11.3521)
+      tmp1 = -61.9;
+    else if (FT1 <= 11.3884)
+      tmp1 = -61.8;
+    else if (FT1 <= 11.4248)
+      tmp1 = -61.7;
+    else if (FT1 <= 11.4613)
+      tmp1 = -61.6;
+    else if (FT1 <= 11.4978)
+      tmp1 = -61.5;
+    else if (FT1 <= 11.5345)
+      tmp1 = -61.4;
+    else if (FT1 <= 11.5712)
+      tmp1 = -61.3;
+    else if (FT1 <= 11.608)
+      tmp1 = -61.2;
+    else if (FT1 <= 11.6449)
+      tmp1 = -61.1;
+  } else if (FT1 <= 12.0184) {
+    if (FT1 == 11.6819)
+      tmp1 = -61;
+    else if (FT1 <= 11.7189)
+      tmp1 = -60.9;
+    else if (FT1 <= 11.7561)
+      tmp1 = -60.8;
+    else if (FT1 <= 11.7933)
+      tmp1 = -60.7;
+    else if (FT1 <= 11.8306)
+      tmp1 = -60.6;
+    else if (FT1 <= 11.868)
+      tmp1 = -60.5;
+    else if (FT1 <= 11.9055)
+      tmp1 = -60.4;
+    else if (FT1 <= 11.943)
+      tmp1 = -60.3;
+    else if (FT1 <= 11.9807)
+      tmp1 = -60.2;
+    else if (FT1 <= 12.0184)
+      tmp1 = -60.1;
+  } else if (FT1 <= 12.4004) {
+    if (FT1 == 12.0562)
+      tmp1 = -60;
+    else if (FT1 <= 12.0941)
+      tmp1 = -59.9;
+    else if (FT1 <= 12.1321)
+      tmp1 = -59.8;
+    else if (FT1 <= 12.1702)
+      tmp1 = -59.7;
+    else if (FT1 <= 12.2083)
+      tmp1 = -59.6;
+    else if (FT1 <= 12.2466)
+      tmp1 = -59.5;
+    else if (FT1 <= 12.2849)
+      tmp1 = -59.4;
+    else if (FT1 <= 12.3233)
+      tmp1 = -59.3;
+    else if (FT1 <= 12.3618)
+      tmp1 = -59.2;
+    else if (FT1 <= 12.4004)
+      tmp1 = -59.1;
+  } else if (FT1 <= 12.791) {
+    if (FT1 == 12.4391)
+      tmp1 = -59;
+    else if (FT1 <= 12.4778)
+      tmp1 = -58.9;
+    else if (FT1 <= 12.5167)
+      tmp1 = -58.8;
+    else if (FT1 <= 12.5556)
+      tmp1 = -58.7;
+    else if (FT1 <= 12.5946)
+      tmp1 = -58.6;
+    else if (FT1 <= 12.6337)
+      tmp1 = -58.5;
+    else if (FT1 <= 12.6729)
+      tmp1 = -58.4;
+    else if (FT1 <= 12.7122)
+      tmp1 = -58.3;
+    else if (FT1 <= 12.7515)
+      tmp1 = -58.2;
+    else if (FT1 <= 12.791)
+      tmp1 = -58.1;
+  } else if (FT1 <= 13.1903) {
+    if (FT1 == 12.8305)
+      tmp1 = -58;
+    else if (FT1 <= 12.8701)
+      tmp1 = -57.9;
+    else if (FT1 <= 12.9099)
+      tmp1 = -57.8;
+    else if (FT1 <= 12.9497)
+      tmp1 = -57.7;
+    else if (FT1 <= 12.9895)
+      tmp1 = -57.6;
+    else if (FT1 <= 13.0295)
+      tmp1 = -57.5;
+    else if (FT1 <= 13.0696)
+      tmp1 = -57.4;
+    else if (FT1 <= 13.1097)
+      tmp1 = -57.3;
+    else if (FT1 <= 13.1499)
+      tmp1 = -57.2;
+    else if (FT1 <= 13.1903)
+      tmp1 = -57.1;
+  } else if (FT1 <= 13.5983) {
+    if (FT1 == 13.2307)
+      tmp1 = -57;
+    else if (FT1 <= 13.2712)
+      tmp1 = -56.9;
+    else if (FT1 <= 13.3117)
+      tmp1 = -56.8;
+    else if (FT1 <= 13.3524)
+      tmp1 = -56.7;
+    else if (FT1 <= 13.3932)
+      tmp1 = -56.6;
+    else if (FT1 <= 13.434)
+      tmp1 = -56.5;
+    else if (FT1 <= 13.475)
+      tmp1 = -56.4;
+    else if (FT1 <= 13.516)
+      tmp1 = -56.3;
+    else if (FT1 <= 13.5571)
+      tmp1 = -56.2;
+    else if (FT1 <= 13.5983)
+      tmp1 = -56.1;
+  } else if (FT1 <= 14.0152) {
+    if (FT1 == 13.6396)
+      tmp1 = -56;
+    else if (FT1 <= 13.681)
+      tmp1 = -55.9;
+    else if (FT1 <= 13.7224)
+      tmp1 = -55.8;
+    else if (FT1 <= 13.764)
+      tmp1 = -55.7;
+    else if (FT1 <= 13.8056)
+      tmp1 = -55.6;
+    else if (FT1 <= 13.8474)
+      tmp1 = -55.5;
+    else if (FT1 <= 13.8892)
+      tmp1 = -55.4;
+    else if (FT1 <= 13.9311)
+      tmp1 = -55.3;
+    else if (FT1 <= 13.9731)
+      tmp1 = -55.2;
+    else if (FT1 <= 14.0152)
+      tmp1 = -55.1;
+  } else if (FT1 <= 14.4411) {
+    if (FT1 == 14.0574)
+      tmp1 = -55;
+    else if (FT1 <= 14.0997)
+      tmp1 = -54.9;
+    else if (FT1 <= 14.142)
+      tmp1 = -54.8;
+    else if (FT1 <= 14.1845)
+      tmp1 = -54.7;
+    else if (FT1 <= 14.227)
+      tmp1 = -54.6;
+    else if (FT1 <= 14.2697)
+      tmp1 = -54.5;
+    else if (FT1 <= 14.3124)
+      tmp1 = -54.4;
+    else if (FT1 <= 14.3552)
+      tmp1 = -54.3;
+    else if (FT1 <= 14.3981)
+      tmp1 = -54.2;
+    else if (FT1 <= 14.4411)
+      tmp1 = -54.1;
+  } else if (FT1 <= 14.8761) {
+    if (FT1 == 14.4842)
+      tmp1 = -54;
+    else if (FT1 <= 14.5274)
+      tmp1 = -53.9;
+    else if (FT1 <= 14.5707)
+      tmp1 = -53.8;
+    else if (FT1 <= 14.614)
+      tmp1 = -53.7;
+    else if (FT1 <= 14.6575)
+      tmp1 = -53.6;
+    else if (FT1 <= 14.701)
+      tmp1 = -53.5;
+    else if (FT1 <= 14.7446)
+      tmp1 = -53.4;
+    else if (FT1 <= 14.7884)
+      tmp1 = -53.3;
+    else if (FT1 <= 14.8322)
+      tmp1 = -53.2;
+    else if (FT1 <= 14.8761)
+      tmp1 = -53.1;
+  } else if (FT1 <= 15.3202) {
+    if (FT1 == 14.9201)
+      tmp1 = -53;
+    else if (FT1 <= 14.9642)
+      tmp1 = -52.9;
+    else if (FT1 <= 15.0084)
+      tmp1 = -52.8;
+    else if (FT1 <= 15.0526)
+      tmp1 = -52.7;
+    else if (FT1 <= 15.097)
+      tmp1 = -52.6;
+    else if (FT1 <= 15.1415)
+      tmp1 = -52.5;
+    else if (FT1 <= 15.186)
+      tmp1 = -52.4;
+    else if (FT1 <= 15.2307)
+      tmp1 = -52.3;
+    else if (FT1 <= 15.2754)
+      tmp1 = -52.2;
+    else if (FT1 <= 15.3202)
+      tmp1 = -52.1;
+  } else if (FT1 <= 15.7736) {
+    if (FT1 == 15.3652)
+      tmp1 = -52;
+    else if (FT1 <= 15.4102)
+      tmp1 = -51.9;
+    else if (FT1 <= 15.4553)
+      tmp1 = -51.8;
+    else if (FT1 <= 15.5005)
+      tmp1 = -51.7;
+    else if (FT1 <= 15.5458)
+      tmp1 = -51.6;
+    else if (FT1 <= 15.5912)
+      tmp1 = -51.5;
+    else if (FT1 <= 15.6366)
+      tmp1 = -51.4;
+    else if (FT1 <= 15.6822)
+      tmp1 = -51.3;
+    else if (FT1 <= 15.7279)
+      tmp1 = -51.2;
+    else if (FT1 <= 15.7736)
+      tmp1 = -51.1;
+  } else if (FT1 <= 16.2364) {
+    if (FT1 == 15.8195)
+      tmp1 = -51;
+    else if (FT1 <= 15.8654)
+      tmp1 = -50.9;
+    else if (FT1 <= 15.9115)
+      tmp1 = -50.8;
+    else if (FT1 <= 15.9576)
+      tmp1 = -50.7;
+    else if (FT1 <= 16.0038)
+      tmp1 = -50.6;
+    else if (FT1 <= 16.0502)
+      tmp1 = -50.5;
+    else if (FT1 <= 16.0966)
+      tmp1 = -50.4;
+    else if (FT1 <= 16.1431)
+      tmp1 = -50.3;
+    else if (FT1 <= 16.1897)
+      tmp1 = -50.2;
+    else if (FT1 <= 16.2364)
+      tmp1 = -50.1;
+  } else if (FT1 <= 16.7086) {
+    if (FT1 == 16.2832)
+      tmp1 = -50;
+    else if (FT1 <= 16.3301)
+      tmp1 = -49.9;
+    else if (FT1 <= 16.3771)
+      tmp1 = -49.8;
+    else if (FT1 <= 16.4241)
+      tmp1 = -49.7;
+    else if (FT1 <= 16.4713)
+      tmp1 = -49.6;
+    else if (FT1 <= 16.5186)
+      tmp1 = -49.5;
+    else if (FT1 <= 16.5659)
+      tmp1 = -49.4;
+    else if (FT1 <= 16.6134)
+      tmp1 = -49.3;
+    else if (FT1 <= 16.6609)
+      tmp1 = -49.2;
+    else if (FT1 <= 16.7086)
+      tmp1 = -49.1;
+  } else if (FT1 <= 17.1904) {
+    if (FT1 == 16.7563)
+      tmp1 = -49;
+    else if (FT1 <= 16.8042)
+      tmp1 = -48.9;
+    else if (FT1 <= 16.8521)
+      tmp1 = -48.8;
+    else if (FT1 <= 16.9002)
+      tmp1 = -48.7;
+    else if (FT1 <= 16.9483)
+      tmp1 = -48.6;
+    else if (FT1 <= 16.9965)
+      tmp1 = -48.5;
+    else if (FT1 <= 17.0448)
+      tmp1 = -48.4;
+    else if (FT1 <= 17.0932)
+      tmp1 = -48.3;
+    else if (FT1 <= 17.1417)
+      tmp1 = -48.2;
+    else if (FT1 <= 17.1904)
+      tmp1 = -48.1;
+  } else if (FT1 <= 17.6817) {
+    if (FT1 == 17.2391)
+      tmp1 = -48;
+    else if (FT1 <= 17.2879)
+      tmp1 = -47.9;
+    else if (FT1 <= 17.3368)
+      tmp1 = -47.8;
+    else if (FT1 <= 17.3858)
+      tmp1 = -47.7;
+    else if (FT1 <= 17.4348)
+      tmp1 = -47.6;
+    else if (FT1 <= 17.484)
+      tmp1 = -47.5;
+    else if (FT1 <= 17.5333)
+      tmp1 = -47.4;
+    else if (FT1 <= 17.5827)
+      tmp1 = -47.3;
+    else if (FT1 <= 17.6322)
+      tmp1 = -47.2;
+    else if (FT1 <= 17.6817)
+      tmp1 = -47.1;
+  } else if (FT1 <= 18.1829) {
+    if (FT1 == 17.7314)
+      tmp1 = -47;
+    else if (FT1 <= 17.7812)
+      tmp1 = -46.9;
+    else if (FT1 <= 17.8311)
+      tmp1 = -46.8;
+    else if (FT1 <= 17.881)
+      tmp1 = -46.7;
+    else if (FT1 <= 17.9311)
+      tmp1 = -46.6;
+    else if (FT1 <= 17.9812)
+      tmp1 = -46.5;
+    else if (FT1 <= 18.0315)
+      tmp1 = -46.4;
+    else if (FT1 <= 18.0819)
+      tmp1 = -46.3;
+    else if (FT1 <= 18.1323)
+      tmp1 = -46.2;
+    else if (FT1 <= 18.1829)
+      tmp1 = -46.1;
+  } else if (FT1 <= 18.6938) {
+    if (FT1 == 18.2335)
+      tmp1 = -46;
+    else if (FT1 <= 18.2843)
+      tmp1 = -45.9;
+    else if (FT1 <= 18.3351)
+      tmp1 = -45.8;
+    else if (FT1 <= 18.3861)
+      tmp1 = -45.7;
+    else if (FT1 <= 18.4371)
+      tmp1 = -45.6;
+    else if (FT1 <= 18.4882)
+      tmp1 = -45.5;
+    else if (FT1 <= 18.5395)
+      tmp1 = -45.4;
+    else if (FT1 <= 18.5908)
+      tmp1 = -45.3;
+    else if (FT1 <= 18.6423)
+      tmp1 = -45.2;
+    else if (FT1 <= 18.6938)
+      tmp1 = -45.1;
+  } else if (FT1 <= 19.2147) {
+    if (FT1 == 18.7454)
+      tmp1 = -45;
+    else if (FT1 <= 18.7972)
+      tmp1 = -44.9;
+    else if (FT1 <= 18.849)
+      tmp1 = -44.8;
+    else if (FT1 <= 18.901)
+      tmp1 = -44.7;
+    else if (FT1 <= 18.953)
+      tmp1 = -44.6;
+    else if (FT1 <= 19.0051)
+      tmp1 = -44.5;
+    else if (FT1 <= 19.0574)
+      tmp1 = -44.4;
+    else if (FT1 <= 19.1097)
+      tmp1 = -44.3;
+    else if (FT1 <= 19.1621)
+      tmp1 = -44.2;
+    else if (FT1 <= 19.2147)
+      tmp1 = -44.1;
+  } else if (FT1 <= 19.7455) {
+    if (FT1 == 19.2673)
+      tmp1 = -44;
+    else if (FT1 <= 19.32)
+      tmp1 = -43.9;
+    else if (FT1 <= 19.3729)
+      tmp1 = -43.8;
+    else if (FT1 <= 19.4258)
+      tmp1 = -43.7;
+    else if (FT1 <= 19.4788)
+      tmp1 = -43.6;
+    else if (FT1 <= 19.532)
+      tmp1 = -43.5;
+    else if (FT1 <= 19.5852)
+      tmp1 = -43.4;
+    else if (FT1 <= 19.6385)
+      tmp1 = -43.3;
+    else if (FT1 <= 19.692)
+      tmp1 = -43.2;
+    else if (FT1 <= 19.7455)
+      tmp1 = -43.1;
+  } else if (FT1 <= 20.2865) {
+    if (FT1 == 19.7991)
+      tmp1 = -43;
+    else if (FT1 <= 19.8529)
+      tmp1 = -42.9;
+    else if (FT1 <= 19.9067)
+      tmp1 = -42.8;
+    else if (FT1 <= 19.9607)
+      tmp1 = -42.7;
+    else if (FT1 <= 20.0147)
+      tmp1 = -42.6;
+    else if (FT1 <= 20.0689)
+      tmp1 = -42.5;
+    else if (FT1 <= 20.1231)
+      tmp1 = -42.4;
+    else if (FT1 <= 20.1775)
+      tmp1 = -42.3;
+    else if (FT1 <= 20.2319)
+      tmp1 = -42.2;
+    else if (FT1 <= 20.2865)
+      tmp1 = -42.1;
+  } else if (FT1 <= 20.8376) {
+    if (FT1 == 20.3411)
+      tmp1 = -42;
+    else if (FT1 <= 20.3959)
+      tmp1 = -41.9;
+    else if (FT1 <= 20.4507)
+      tmp1 = -41.8;
+    else if (FT1 <= 20.5057)
+      tmp1 = -41.7;
+    else if (FT1 <= 20.5607)
+      tmp1 = -41.6;
+    else if (FT1 <= 20.6159)
+      tmp1 = -41.5;
+    else if (FT1 <= 20.6712)
+      tmp1 = -41.4;
+    else if (FT1 <= 20.7265)
+      tmp1 = -41.3;
+    else if (FT1 <= 20.782)
+      tmp1 = -41.2;
+    else if (FT1 <= 20.8376)
+      tmp1 = -41.1;
+  } else if (FT1 <= 21.3989) {
+    if (FT1 == 20.8932)
+      tmp1 = -41;
+    else if (FT1 <= 20.949)
+      tmp1 = -40.9;
+    else if (FT1 <= 21.0049)
+      tmp1 = -40.8;
+    else if (FT1 <= 21.0609)
+      tmp1 = -40.7;
+    else if (FT1 <= 21.117)
+      tmp1 = -40.6;
+    else if (FT1 <= 21.1732)
+      tmp1 = -40.5;
+    else if (FT1 <= 21.2294)
+      tmp1 = -40.4;
+    else if (FT1 <= 21.2858)
+      tmp1 = -40.3;
+    else if (FT1 <= 21.3423)
+      tmp1 = -40.2;
+    else if (FT1 <= 21.3989)
+      tmp1 = -40.1;
+  } else if (FT1 <= 21.9707) {
+    if (FT1 == 21.4556)
+      tmp1 = -40;
+    else if (FT1 <= 21.5125)
+      tmp1 = -39.9;
+    else if (FT1 <= 21.5694)
+      tmp1 = -39.8;
+    else if (FT1 <= 21.6264)
+      tmp1 = -39.7;
+    else if (FT1 <= 21.6835)
+      tmp1 = -39.6;
+    else if (FT1 <= 21.7407)
+      tmp1 = -39.5;
+    else if (FT1 <= 21.7981)
+      tmp1 = -39.4;
+    else if (FT1 <= 21.8555)
+      tmp1 = -39.3;
+    else if (FT1 <= 21.913)
+      tmp1 = -39.2;
+    else if (FT1 <= 21.9707)
+      tmp1 = -39.1;
+  } else if (FT1 <= 22.5528) {
+    if (FT1 == 22.0284)
+      tmp1 = -39;
+    else if (FT1 <= 22.0863)
+      tmp1 = -38.9;
+    else if (FT1 <= 22.1442)
+      tmp1 = -38.8;
+    else if (FT1 <= 22.2023)
+      tmp1 = -38.7;
+    else if (FT1 <= 22.2604)
+      tmp1 = -38.6;
+    else if (FT1 <= 22.3187)
+      tmp1 = -38.5;
+    else if (FT1 <= 22.3771)
+      tmp1 = -38.4;
+    else if (FT1 <= 22.4356)
+      tmp1 = -38.3;
+    else if (FT1 <= 22.4941)
+      tmp1 = -38.2;
+    else if (FT1 <= 22.5528)
+      tmp1 = -38.1;
+  } else if (FT1 <= 23.1455) {
+    if (FT1 == 22.6116)
+      tmp1 = -38;
+    else if (FT1 <= 22.6705)
+      tmp1 = -37.9;
+    else if (FT1 <= 22.7295)
+      tmp1 = -37.8;
+    else if (FT1 <= 22.7886)
+      tmp1 = -37.7;
+    else if (FT1 <= 22.8479)
+      tmp1 = -37.6;
+    else if (FT1 <= 22.9072)
+      tmp1 = -37.5;
+    else if (FT1 <= 22.9666)
+      tmp1 = -37.4;
+    else if (FT1 <= 23.0261)
+      tmp1 = -37.3;
+    else if (FT1 <= 23.0858)
+      tmp1 = -37.2;
+    else if (FT1 <= 23.1455)
+      tmp1 = -37.1;
+  } else if (FT1 <= 23.7488) {
+    if (FT1 == 23.2054)
+      tmp1 = -37;
+    else if (FT1 <= 23.2653)
+      tmp1 = -36.9;
+    else if (FT1 <= 23.3254)
+      tmp1 = -36.8;
+    else if (FT1 <= 23.3856)
+      tmp1 = -36.7;
+    else if (FT1 <= 23.4458)
+      tmp1 = -36.6;
+    else if (FT1 <= 23.5062)
+      tmp1 = -36.5;
+    else if (FT1 <= 23.5667)
+      tmp1 = -36.4;
+    else if (FT1 <= 23.6273)
+      tmp1 = -36.3;
+    else if (FT1 <= 23.688)
+      tmp1 = -36.2;
+    else if (FT1 <= 23.7488)
+      tmp1 = -36.1;
+  } else if (FT1 <= 24.3628) {
+    if (FT1 == 23.8097)
+      tmp1 = -36;
+    else if (FT1 <= 23.8707)
+      tmp1 = -35.9;
+    else if (FT1 <= 23.9319)
+      tmp1 = -35.8;
+    else if (FT1 <= 23.9931)
+      tmp1 = -35.7;
+    else if (FT1 <= 24.0544)
+      tmp1 = -35.6;
+    else if (FT1 <= 24.1159)
+      tmp1 = -35.5;
+    else if (FT1 <= 24.1775)
+      tmp1 = -35.4;
+    else if (FT1 <= 24.2391)
+      tmp1 = -35.3;
+    else if (FT1 <= 24.3009)
+      tmp1 = -35.2;
+    else if (FT1 <= 24.3628)
+      tmp1 = -35.1;
+  } else if (FT1 <= 24.9875) {
+    if (FT1 == 24.4248)
+      tmp1 = -35;
+    else if (FT1 <= 24.4869)
+      tmp1 = -34.9;
+    else if (FT1 <= 24.5491)
+      tmp1 = -34.8;
+    else if (FT1 <= 24.6114)
+      tmp1 = -34.7;
+    else if (FT1 <= 24.6738)
+      tmp1 = -34.6;
+    else if (FT1 <= 24.7363)
+      tmp1 = -34.5;
+    else if (FT1 <= 24.799)
+      tmp1 = -34.4;
+    else if (FT1 <= 24.8617)
+      tmp1 = -34.3;
+    else if (FT1 <= 24.9246)
+      tmp1 = -34.2;
+    else if (FT1 <= 24.9875)
+      tmp1 = -34.1;
+  } else if (FT1 <= 25.6231) {
+    if (FT1 == 25.0506)
+      tmp1 = -34;
+    else if (FT1 <= 25.1138)
+      tmp1 = -33.9;
+    else if (FT1 <= 25.1771)
+      tmp1 = -33.8;
+    else if (FT1 <= 25.2404)
+      tmp1 = -33.7;
+    else if (FT1 <= 25.3039)
+      tmp1 = -33.6;
+    else if (FT1 <= 25.3676)
+      tmp1 = -33.5;
+    else if (FT1 <= 25.4313)
+      tmp1 = -33.4;
+    else if (FT1 <= 25.4951)
+      tmp1 = -33.3;
+    else if (FT1 <= 25.5591)
+      tmp1 = -33.2;
+    else if (FT1 <= 25.6231)
+      tmp1 = -33.1;
+  } else if (FT1 <= 26.2696) {
+    if (FT1 == 25.6873)
+      tmp1 = -33;
+    else if (FT1 <= 25.7515)
+      tmp1 = -32.9;
+    else if (FT1 <= 25.8159)
+      tmp1 = -32.8;
+    else if (FT1 <= 25.8804)
+      tmp1 = -32.7;
+    else if (FT1 <= 25.945)
+      tmp1 = -32.6;
+    else if (FT1 <= 26.0097)
+      tmp1 = -32.5;
+    else if (FT1 <= 26.0745)
+      tmp1 = -32.4;
+    else if (FT1 <= 26.1394)
+      tmp1 = -32.3;
+    else if (FT1 <= 26.2045)
+      tmp1 = -32.2;
+    else if (FT1 <= 26.2696)
+      tmp1 = -32.1;
+  } else if (FT1 <= 26.9272) {
+    if (FT1 == 26.3349)
+      tmp1 = -32;
+    else if (FT1 <= 26.4002)
+      tmp1 = -31.9;
+    else if (FT1 <= 26.4657)
+      tmp1 = -31.8;
+    else if (FT1 <= 26.5313)
+      tmp1 = -31.7;
+    else if (FT1 <= 26.597)
+      tmp1 = -31.6;
+    else if (FT1 <= 26.6628)
+      tmp1 = -31.5;
+    else if (FT1 <= 26.7287)
+      tmp1 = -31.4;
+    else if (FT1 <= 26.7948)
+      tmp1 = -31.3;
+    else if (FT1 <= 26.8609)
+      tmp1 = -31.2;
+    else if (FT1 <= 26.9272)
+      tmp1 = -31.1;
+  } else if (FT1 <= 27.5958) {
+    if (FT1 == 26.9935)
+      tmp1 = -31;
+    else if (FT1 <= 27.06)
+      tmp1 = -30.9;
+    else if (FT1 <= 27.1266)
+      tmp1 = -30.8;
+    else if (FT1 <= 27.1933)
+      tmp1 = -30.7;
+    else if (FT1 <= 27.2601)
+      tmp1 = -30.6;
+    else if (FT1 <= 27.327)
+      tmp1 = -30.5;
+    else if (FT1 <= 27.394)
+      tmp1 = -30.4;
+    else if (FT1 <= 27.4612)
+      tmp1 = -30.3;
+    else if (FT1 <= 27.5284)
+      tmp1 = -30.2;
+    else if (FT1 <= 27.5958)
+      tmp1 = -30.1;
+  } else if (FT1 <= 28.2756) {
+    if (FT1 == 27.6632)
+      tmp1 = -30;
+    else if (FT1 <= 27.7308)
+      tmp1 = -29.9;
+    else if (FT1 <= 27.7985)
+      tmp1 = -29.8;
+    else if (FT1 <= 27.8663)
+      tmp1 = -29.7;
+    else if (FT1 <= 27.9343)
+      tmp1 = -29.6;
+    else if (FT1 <= 28.0023)
+      tmp1 = -29.5;
+    else if (FT1 <= 28.0704)
+      tmp1 = -29.4;
+    else if (FT1 <= 28.1387)
+      tmp1 = -29.3;
+    else if (FT1 <= 28.2071)
+      tmp1 = -29.2;
+    else if (FT1 <= 28.2756)
+      tmp1 = -29.1;
+  } else if (FT1 <= 28.9666) {
+    if (FT1 == 28.3441)
+      tmp1 = -29;
+    else if (FT1 <= 28.4129)
+      tmp1 = -28.9;
+    else if (FT1 <= 28.4817)
+      tmp1 = -28.8;
+    else if (FT1 <= 28.5506)
+      tmp1 = -28.7;
+    else if (FT1 <= 28.6197)
+      tmp1 = -28.6;
+    else if (FT1 <= 28.6888)
+      tmp1 = -28.5;
+    else if (FT1 <= 28.7581)
+      tmp1 = -28.4;
+    else if (FT1 <= 28.8275)
+      tmp1 = -28.3;
+    else if (FT1 <= 28.897)
+      tmp1 = -28.2;
+    else if (FT1 <= 28.9666)
+      tmp1 = -28.1;
+  } else if (FT1 <= 29.6689) {
+    if (FT1 == 29.0363)
+      tmp1 = -28;
+    else if (FT1 <= 29.1061)
+      tmp1 = -27.9;
+    else if (FT1 <= 29.1761)
+      tmp1 = -27.8;
+    else if (FT1 <= 29.2462)
+      tmp1 = -27.7;
+    else if (FT1 <= 29.3163)
+      tmp1 = -27.6;
+    else if (FT1 <= 29.3866)
+      tmp1 = -27.5;
+    else if (FT1 <= 29.457)
+      tmp1 = -27.4;
+    else if (FT1 <= 29.5275)
+      tmp1 = -27.3;
+    else if (FT1 <= 29.5982)
+      tmp1 = -27.2;
+    else if (FT1 <= 29.6689)
+      tmp1 = -27.1;
+  } else if (FT1 <= 30.3827) {
+    if (FT1 == 29.7398)
+      tmp1 = -27;
+    else if (FT1 <= 29.8108)
+      tmp1 = -26.9;
+    else if (FT1 <= 29.8818)
+      tmp1 = -26.8;
+    else if (FT1 <= 29.953)
+      tmp1 = -26.7;
+    else if (FT1 <= 30.0244)
+      tmp1 = -26.6;
+    else if (FT1 <= 30.0958)
+      tmp1 = -26.5;
+    else if (FT1 <= 30.1673)
+      tmp1 = -26.4;
+    else if (FT1 <= 30.239)
+      tmp1 = -26.3;
+    else if (FT1 <= 30.3108)
+      tmp1 = -26.2;
+    else if (FT1 <= 30.3827)
+      tmp1 = -26.1;
+  } else if (FT1 <= 31.1079) {
+    if (FT1 == 30.4547)
+      tmp1 = -26;
+    else if (FT1 <= 30.5268)
+      tmp1 = -25.9;
+    else if (FT1 <= 30.599)
+      tmp1 = -25.8;
+    else if (FT1 <= 30.6714)
+      tmp1 = -25.7;
+    else if (FT1 <= 30.7438)
+      tmp1 = -25.6;
+    else if (FT1 <= 30.8164)
+      tmp1 = -25.5;
+    else if (FT1 <= 30.8891)
+      tmp1 = -25.4;
+    else if (FT1 <= 30.9619)
+      tmp1 = -25.3;
+    else if (FT1 <= 31.0348)
+      tmp1 = -25.2;
+    else if (FT1 <= 31.1079)
+      tmp1 = -25.1;
+  } else if (FT1 <= 31.8446) {
+    if (FT1 == 31.181)
+      tmp1 = -25;
+    else if (FT1 <= 31.2543)
+      tmp1 = -24.9;
+    else if (FT1 <= 31.3277)
+      tmp1 = -24.8;
+    else if (FT1 <= 31.4012)
+      tmp1 = -24.7;
+    else if (FT1 <= 31.4748)
+      tmp1 = -24.6;
+    else if (FT1 <= 31.5485)
+      tmp1 = -24.5;
+    else if (FT1 <= 31.6224)
+      tmp1 = -24.4;
+    else if (FT1 <= 31.6963)
+      tmp1 = -24.3;
+    else if (FT1 <= 31.7704)
+      tmp1 = -24.2;
+    else if (FT1 <= 31.8446)
+      tmp1 = -24.1;
+  } else if (FT1 <= 32.593) {
+    if (FT1 == 31.9189)
+      tmp1 = -24;
+    else if (FT1 <= 31.9933)
+      tmp1 = -23.9;
+    else if (FT1 <= 32.0679)
+      tmp1 = -23.8;
+    else if (FT1 <= 32.1425)
+      tmp1 = -23.7;
+    else if (FT1 <= 32.2173)
+      tmp1 = -23.6;
+    else if (FT1 <= 32.2922)
+      tmp1 = -23.5;
+    else if (FT1 <= 32.3672)
+      tmp1 = -23.4;
+    else if (FT1 <= 32.4423)
+      tmp1 = -23.3;
+    else if (FT1 <= 32.5176)
+      tmp1 = -23.2;
+    else if (FT1 <= 32.593)
+      tmp1 = -23.1;
+  } else if (FT1 <= 33.353) {
+    if (FT1 == 32.6684)
+      tmp1 = -23;
+    else if (FT1 <= 32.744)
+      tmp1 = -22.9;
+    else if (FT1 <= 32.8197)
+      tmp1 = -22.8;
+    else if (FT1 <= 32.8956)
+      tmp1 = -22.7;
+    else if (FT1 <= 32.9715)
+      tmp1 = -22.6;
+    else if (FT1 <= 33.0476)
+      tmp1 = -22.5;
+    else if (FT1 <= 33.1237)
+      tmp1 = -22.4;
+    else if (FT1 <= 33.2)
+      tmp1 = -22.3;
+    else if (FT1 <= 33.2765)
+      tmp1 = -22.2;
+    else if (FT1 <= 33.353)
+      tmp1 = -22.1;
+  } else if (FT1 <= 34.1248) {
+    if (FT1 == 33.4296)
+      tmp1 = -22;
+    else if (FT1 <= 33.5064)
+      tmp1 = -21.9;
+    else if (FT1 <= 33.5833)
+      tmp1 = -21.8;
+    else if (FT1 <= 33.6603)
+      tmp1 = -21.7;
+    else if (FT1 <= 33.7374)
+      tmp1 = -21.6;
+    else if (FT1 <= 33.8146)
+      tmp1 = -21.5;
+    else if (FT1 <= 33.892)
+      tmp1 = -21.4;
+    else if (FT1 <= 33.9695)
+      tmp1 = -21.3;
+    else if (FT1 <= 34.0471)
+      tmp1 = -21.2;
+    else if (FT1 <= 34.1248)
+      tmp1 = -21.1;
+  } else if (FT1 <= 34.9084) {
+    if (FT1 == 34.2026)
+      tmp1 = -21;
+    else if (FT1 <= 34.2806)
+      tmp1 = -20.9;
+    else if (FT1 <= 34.3586)
+      tmp1 = -20.8;
+    else if (FT1 <= 34.4368)
+      tmp1 = -20.7;
+    else if (FT1 <= 34.5151)
+      tmp1 = -20.6;
+    else if (FT1 <= 34.5935)
+      tmp1 = -20.5;
+    else if (FT1 <= 34.6721)
+      tmp1 = -20.4;
+    else if (FT1 <= 34.7507)
+      tmp1 = -20.3;
+    else if (FT1 <= 34.8295)
+      tmp1 = -20.2;
+    else if (FT1 <= 34.9084)
+      tmp1 = -20.1;
+  } else if (FT1 <= 35.7039) {
+    if (FT1 == 34.9874)
+      tmp1 = -20;
+    else if (FT1 <= 35.0665)
+      tmp1 = -19.9;
+    else if (FT1 <= 35.1458)
+      tmp1 = -19.8;
+    else if (FT1 <= 35.2252)
+      tmp1 = -19.7;
+    else if (FT1 <= 35.3047)
+      tmp1 = -19.6;
+    else if (FT1 <= 35.3843)
+      tmp1 = -19.5;
+    else if (FT1 <= 35.464)
+      tmp1 = -19.4;
+    else if (FT1 <= 35.5438)
+      tmp1 = -19.3;
+    else if (FT1 <= 35.6238)
+      tmp1 = -19.2;
+    else if (FT1 <= 35.7039)
+      tmp1 = -19.1;
+  } else if (FT1 <= 36.5114) {
+    if (FT1 == 35.7841)
+      tmp1 = -19;
+    else if (FT1 <= 35.8644)
+      tmp1 = -18.9;
+    else if (FT1 <= 35.9449)
+      tmp1 = -18.8;
+    else if (FT1 <= 36.0254)
+      tmp1 = -18.7;
+    else if (FT1 <= 36.1061)
+      tmp1 = -18.6;
+    else if (FT1 <= 36.1869)
+      tmp1 = -18.5;
+    else if (FT1 <= 36.2679)
+      tmp1 = -18.4;
+    else if (FT1 <= 36.3489)
+      tmp1 = -18.3;
+    else if (FT1 <= 36.4301)
+      tmp1 = -18.2;
+    else if (FT1 <= 36.5114)
+      tmp1 = -18.1;
+  } else if (FT1 <= 37.3308) {
+    if (FT1 == 36.5928)
+      tmp1 = -18;
+    else if (FT1 <= 36.6743)
+      tmp1 = -17.9;
+    else if (FT1 <= 36.7559)
+      tmp1 = -17.8;
+    else if (FT1 <= 36.8377)
+      tmp1 = -17.7;
+    else if (FT1 <= 36.9196)
+      tmp1 = -17.6;
+    else if (FT1 <= 37.0016)
+      tmp1 = -17.5;
+    else if (FT1 <= 37.0837)
+      tmp1 = -17.4;
+    else if (FT1 <= 37.166)
+      tmp1 = -17.3;
+    else if (FT1 <= 37.2484)
+      tmp1 = -17.2;
+    else if (FT1 <= 37.3308)
+      tmp1 = -17.1;
+  } else if (FT1 <= 38.1624) {
+    if (FT1 == 37.4135)
+      tmp1 = -17;
+    else if (FT1 <= 37.4962)
+      tmp1 = -16.9;
+    else if (FT1 <= 37.579)
+      tmp1 = -16.8;
+    else if (FT1 <= 37.662)
+      tmp1 = -16.7;
+    else if (FT1 <= 37.7451)
+      tmp1 = -16.6;
+    else if (FT1 <= 37.8283)
+      tmp1 = -16.5;
+    else if (FT1 <= 37.9117)
+      tmp1 = -16.4;
+    else if (FT1 <= 37.9951)
+      tmp1 = -16.3;
+    else if (FT1 <= 38.0787)
+      tmp1 = -16.2;
+    else if (FT1 <= 38.1624)
+      tmp1 = -16.1;
+  } else if (FT1 <= 39.0062) {
+    if (FT1 == 38.2462)
+      tmp1 = -16;
+    else if (FT1 <= 38.3302)
+      tmp1 = -15.9;
+    else if (FT1 <= 38.4143)
+      tmp1 = -15.8;
+    else if (FT1 <= 38.4985)
+      tmp1 = -15.7;
+    else if (FT1 <= 38.5828)
+      tmp1 = -15.6;
+    else if (FT1 <= 38.6672)
+      tmp1 = -15.5;
+    else if (FT1 <= 38.7518)
+      tmp1 = -15.4;
+    else if (FT1 <= 38.8364)
+      tmp1 = -15.3;
+    else if (FT1 <= 38.9212)
+      tmp1 = -15.2;
+    else if (FT1 <= 39.0062)
+      tmp1 = -15.1;
+    else if (FT1 <= 39.0912)
+      tmp1 = -15;
+  } else if (FT1 <= 39.8621) {
+    if (FT1 == 39.0912)
+      tmp1 = -15;
+    else if (FT1 <= 39.1764)
+      tmp1 = -14.9;
+    else if (FT1 <= 39.2617)
+      tmp1 = -14.8;
+    else if (FT1 <= 39.3471)
+      tmp1 = -14.7;
+    else if (FT1 <= 39.4326)
+      tmp1 = -14.6;
+    else if (FT1 <= 39.5183)
+      tmp1 = -14.5;
+    else if (FT1 <= 39.604)
+      tmp1 = -14.4;
+    else if (FT1 <= 39.6899)
+      tmp1 = -14.3;
+    else if (FT1 <= 39.776)
+      tmp1 = -14.2;
+    else if (FT1 <= 39.8621)
+      tmp1 = -14.1;
+    else if (FT1 <= 39.9484)
+      tmp1 = -14;
+  } else if (FT1 <= 40.7303) {
+    if (FT1 == 39.9484)
+      tmp1 = -14;
+    else if (FT1 <= 40.0348)
+      tmp1 = -13.9;
+    else if (FT1 <= 40.1213)
+      tmp1 = -13.8;
+    else if (FT1 <= 40.2079)
+      tmp1 = -13.7;
+    else if (FT1 <= 40.2947)
+      tmp1 = -13.6;
+    else if (FT1 <= 40.3816)
+      tmp1 = -13.5;
+    else if (FT1 <= 40.4686)
+      tmp1 = -13.4;
+    else if (FT1 <= 40.5557)
+      tmp1 = -13.3;
+    else if (FT1 <= 40.643)
+      tmp1 = -13.2;
+    else if (FT1 <= 40.7303)
+      tmp1 = -13.1;
+    else if (FT1 <= 40.8178)
+      tmp1 = -13;
+  } else if (FT1 <= 41.6109) {
+    if (FT1 == 40.8178)
+      tmp1 = -13;
+    else if (FT1 <= 40.9055)
+      tmp1 = -12.9;
+    else if (FT1 <= 40.9932)
+      tmp1 = -12.8;
+    else if (FT1 <= 41.0811)
+      tmp1 = -12.7;
+    else if (FT1 <= 41.1691)
+      tmp1 = -12.6;
+    else if (FT1 <= 41.2572)
+      tmp1 = -12.5;
+    else if (FT1 <= 41.3454)
+      tmp1 = -12.4;
+    else if (FT1 <= 41.4338)
+      tmp1 = -12.3;
+    else if (FT1 <= 41.5223)
+      tmp1 = -12.2;
+    else if (FT1 <= 41.6109)
+      tmp1 = -12.1;
+    else if (FT1 <= 41.6997)
+      tmp1 = -12;
+  } else if (FT1 <= 42.5039) {
+    if (FT1 == 41.6997)
+      tmp1 = -12;
+    else if (FT1 <= 41.7885)
+      tmp1 = -11.9;
+    else if (FT1 <= 41.8775)
+      tmp1 = -11.8;
+    else if (FT1 <= 41.9666)
+      tmp1 = -11.7;
+    else if (FT1 <= 42.0559)
+      tmp1 = -11.6;
+    else if (FT1 <= 42.1452)
+      tmp1 = -11.5;
+    else if (FT1 <= 42.2347)
+      tmp1 = -11.4;
+    else if (FT1 <= 42.3243)
+      tmp1 = -11.3;
+    else if (FT1 <= 42.414)
+      tmp1 = -11.2;
+    else if (FT1 <= 42.5039)
+      tmp1 = -11.1;
+    else if (FT1 <= 42.5939)
+      tmp1 = -11;
+  } else if (FT1 <= 43.4093) {
+    if (FT1 == 42.5939)
+      tmp1 = -11;
+    else if (FT1 <= 42.684)
+      tmp1 = -10.9;
+    else if (FT1 <= 42.7742)
+      tmp1 = -10.8;
+    else if (FT1 <= 42.8646)
+      tmp1 = -10.7;
+    else if (FT1 <= 42.9551)
+      tmp1 = -10.6;
+    else if (FT1 <= 43.0457)
+      tmp1 = -10.5;
+    else if (FT1 <= 43.1364)
+      tmp1 = -10.4;
+    else if (FT1 <= 43.2273)
+      tmp1 = -10.3;
+    else if (FT1 <= 43.3182)
+      tmp1 = -10.2;
+    else if (FT1 <= 43.4093)
+      tmp1 = -10.1;
+    else if (FT1 <= 43.5006)
+      tmp1 = -10;
+  } else if (FT1 <= 44.3273) {
+    if (FT1 == 43.5006)
+      tmp1 = -10;
+    else if (FT1 <= 43.5919)
+      tmp1 = -9.9;
+    else if (FT1 <= 43.6834)
+      tmp1 = -9.8;
+    else if (FT1 <= 43.775)
+      tmp1 = -9.7;
+    else if (FT1 <= 43.8668)
+      tmp1 = -9.6;
+    else if (FT1 <= 43.9586)
+      tmp1 = -9.5;
+    else if (FT1 <= 44.0506)
+      tmp1 = -9.4;
+    else if (FT1 <= 44.1427)
+      tmp1 = -9.3;
+    else if (FT1 <= 44.2349)
+      tmp1 = -9.2;
+    else if (FT1 <= 44.3273)
+      tmp1 = -9.1;
+    else if (FT1 <= 44.4198)
+      tmp1 = -9;
+  } else if (FT1 <= 45.2579) {
+    if (FT1 == 44.4198)
+      tmp1 = -9;
+    else if (FT1 <= 44.5124)
+      tmp1 = -8.9;
+    else if (FT1 <= 44.6051)
+      tmp1 = -8.8;
+    else if (FT1 <= 44.698)
+      tmp1 = -8.7;
+    else if (FT1 <= 44.791)
+      tmp1 = -8.6;
+    else if (FT1 <= 44.8841)
+      tmp1 = -8.5;
+    else if (FT1 <= 44.9774)
+      tmp1 = -8.4;
+    else if (FT1 <= 45.0707)
+      tmp1 = -8.3;
+    else if (FT1 <= 45.1642)
+      tmp1 = -8.2;
+    else if (FT1 <= 45.2579)
+      tmp1 = -8.1;
+    else if (FT1 <= 45.3516)
+      tmp1 = -8;
+  } else if (FT1 <= 46.201) {
+    if (FT1 == 45.3516)
+      tmp1 = -8;
+    else if (FT1 <= 45.4455)
+      tmp1 = -7.9;
+    else if (FT1 <= 45.5395)
+      tmp1 = -7.8;
+    else if (FT1 <= 45.6336)
+      tmp1 = -7.7;
+    else if (FT1 <= 45.7279)
+      tmp1 = -7.6;
+    else if (FT1 <= 45.8222)
+      tmp1 = -7.5;
+    else if (FT1 <= 45.9168)
+      tmp1 = -7.4;
+    else if (FT1 <= 46.0114)
+      tmp1 = -7.3;
+    else if (FT1 <= 46.1061)
+      tmp1 = -7.2;
+    else if (FT1 <= 46.201)
+      tmp1 = -7.1;
+    else if (FT1 <= 46.2961)
+      tmp1 = -7;
+  } else if (FT1 <= 47.1569) {
+    if (FT1 == 46.2961)
+      tmp1 = -7;
+    else if (FT1 <= 46.3912)
+      tmp1 = -6.9;
+    else if (FT1 <= 46.4865)
+      tmp1 = -6.8;
+    else if (FT1 <= 46.5819)
+      tmp1 = -6.7;
+    else if (FT1 <= 46.6774)
+      tmp1 = -6.6;
+    else if (FT1 <= 46.773)
+      tmp1 = -6.5;
+    else if (FT1 <= 46.8688)
+      tmp1 = -6.4;
+    else if (FT1 <= 46.9647)
+      tmp1 = -6.3;
+    else if (FT1 <= 47.0608)
+      tmp1 = -6.2;
+    else if (FT1 <= 47.1569)
+      tmp1 = -6.1;
+    else if (FT1 <= 47.2532)
+      tmp1 = -6;
+  } else if (FT1 <= 48.1255) {
+    if (FT1 == 47.2532)
+      tmp1 = -6;
+    else if (FT1 <= 47.3496)
+      tmp1 = -5.9;
+    else if (FT1 <= 47.4462)
+      tmp1 = -5.8;
+    else if (FT1 <= 47.5428)
+      tmp1 = -5.7;
+    else if (FT1 <= 47.6396)
+      tmp1 = -5.6;
+    else if (FT1 <= 47.7366)
+      tmp1 = -5.5;
+    else if (FT1 <= 47.8336)
+      tmp1 = -5.4;
+    else if (FT1 <= 47.9308)
+      tmp1 = -5.3;
+    else if (FT1 <= 48.0281)
+      tmp1 = -5.2;
+    else if (FT1 <= 48.1255)
+      tmp1 = -5.1;
+    else if (FT1 <= 48.2231)
+      tmp1 = -5;
+  } else if (FT1 <= 49.107) {
+    if (FT1 == 48.2231)
+      tmp1 = -5;
+    else if (FT1 <= 48.3208)
+      tmp1 = -4.9;
+    else if (FT1 <= 48.4186)
+      tmp1 = -4.8;
+    else if (FT1 <= 48.5166)
+      tmp1 = -4.7;
+    else if (FT1 <= 48.6147)
+      tmp1 = -4.6;
+    else if (FT1 <= 48.7129)
+      tmp1 = -4.5;
+    else if (FT1 <= 48.8112)
+      tmp1 = -4.4;
+    else if (FT1 <= 48.9097)
+      tmp1 = -4.3;
+    else if (FT1 <= 49.0083)
+      tmp1 = -4.2;
+    else if (FT1 <= 49.107)
+      tmp1 = -4.1;
+    else if (FT1 <= 49.2058)
+      tmp1 = -4;
+  } else if (FT1 <= 50.1013) {
+    if (FT1 == 49.2058)
+      tmp1 = -4;
+    else if (FT1 <= 49.3048)
+      tmp1 = -3.9;
+    else if (FT1 <= 49.4039)
+      tmp1 = -3.8;
+    else if (FT1 <= 49.5031)
+      tmp1 = -3.7;
+    else if (FT1 <= 49.6025)
+      tmp1 = -3.6;
+    else if (FT1 <= 49.702)
+      tmp1 = -3.5;
+    else if (FT1 <= 49.8016)
+      tmp1 = -3.4;
+    else if (FT1 <= 49.9014)
+      tmp1 = -3.3;
+    else if (FT1 <= 50.0012)
+      tmp1 = -3.2;
+    else if (FT1 <= 50.1013)
+      tmp1 = -3.1;
+  } else if (FT1 <= 51.1085) {
+    if (FT1 == 50.2014)
+      tmp1 = -3;
+    else if (FT1 <= 50.3017)
+      tmp1 = -2.9;
+    else if (FT1 <= 50.4021)
+      tmp1 = -2.8;
+    else if (FT1 <= 50.5026)
+      tmp1 = -2.7;
+    else if (FT1 <= 50.6032)
+      tmp1 = -2.6;
+    else if (FT1 <= 50.704)
+      tmp1 = -2.5;
+    else if (FT1 <= 50.8049)
+      tmp1 = -2.4;
+    else if (FT1 <= 50.906)
+      tmp1 = -2.3;
+    else if (FT1 <= 51.0071)
+      tmp1 = -2.2;
+    else if (FT1 <= 51.1085)
+      tmp1 = -2.1;
+  } else if (FT1 <= 52.1286) {
+    if (FT1 == 51.2099)
+      tmp1 = -2;
+    else if (FT1 <= 51.3114)
+      tmp1 = -1.9;
+    else if (FT1 <= 51.4131)
+      tmp1 = -1.8;
+    else if (FT1 <= 51.515)
+      tmp1 = -1.7;
+    else if (FT1 <= 51.6169)
+      tmp1 = -1.6;
+    else if (FT1 <= 51.719)
+      tmp1 = -1.5;
+    else if (FT1 <= 51.8212)
+      tmp1 = -1.4;
+    else if (FT1 <= 51.9235)
+      tmp1 = -1.3;
+    else if (FT1 <= 52.026)
+      tmp1 = -1.2;
+    else if (FT1 <= 52.1286)
+      tmp1 = -1.1;
+  } else if (FT1 <= 53.1618) {
+    if (FT1 == 52.2313)
+      tmp1 = -1;
+    else if (FT1 <= 52.3342)
+      tmp1 = -0.9;
+    else if (FT1 <= 52.4372)
+      tmp1 = -0.8;
+    else if (FT1 <= 52.5403)
+      tmp1 = -0.7;
+    else if (FT1 <= 52.6436)
+      tmp1 = -0.6;
+    else if (FT1 <= 52.7469)
+      tmp1 = -0.5;
+    else if (FT1 <= 52.8504)
+      tmp1 = -0.4;
+    else if (FT1 <= 52.9541)
+      tmp1 = -0.3;
+    else if (FT1 <= 53.0579)
+      tmp1 = -0.2;
+    else if (FT1 <= 53.1618)
+      tmp1 = -0.1;
+    else if (FT1 <= 53.2658)
+      tmp1 = -1.38778e-16;
+  } else if (FT1 <= 54.208) {
+    if (FT1 == 53.2658)
+      tmp1 = 0;
+    else if (FT1 <= 53.37)
+      tmp1 = 0.1;
+    else if (FT1 <= 53.4743)
+      tmp1 = 0.2;
+    else if (FT1 <= 53.5787)
+      tmp1 = 0.3;
+    else if (FT1 <= 53.6832)
+      tmp1 = 0.4;
+    else if (FT1 <= 53.7879)
+      tmp1 = 0.5;
+    else if (FT1 <= 53.8927)
+      tmp1 = 0.6;
+    else if (FT1 <= 53.9977)
+      tmp1 = 0.7;
+    else if (FT1 <= 54.1028)
+      tmp1 = 0.8;
+    else if (FT1 <= 54.208)
+      tmp1 = 0.9;
+    else if (FT1 <= 54.3133)
+      tmp1 = 1;
+  } else if (FT1 <= 55.2673) {
+    if (FT1 == 54.3133)
+      tmp1 = 1;
+    else if (FT1 <= 54.4188)
+      tmp1 = 1.1;
+    else if (FT1 <= 54.5244)
+      tmp1 = 1.2;
+    else if (FT1 <= 54.6301)
+      tmp1 = 1.3;
+    else if (FT1 <= 54.736)
+      tmp1 = 1.4;
+    else if (FT1 <= 54.842)
+      tmp1 = 1.5;
+    else if (FT1 <= 54.9481)
+      tmp1 = 1.6;
+    else if (FT1 <= 55.0544)
+      tmp1 = 1.7;
+    else if (FT1 <= 55.1608)
+      tmp1 = 1.8;
+    else if (FT1 <= 55.2673)
+      tmp1 = 1.9;
+  } else if (FT1 <= 56.3398) {
+    if (FT1 == 55.374)
+      tmp1 = 2;
+    else if (FT1 <= 55.4808)
+      tmp1 = 2.1;
+    else if (FT1 <= 55.5877)
+      tmp1 = 2.2;
+    else if (FT1 <= 55.6947)
+      tmp1 = 2.3;
+    else if (FT1 <= 55.8019)
+      tmp1 = 2.4;
+    else if (FT1 <= 55.9092)
+      tmp1 = 2.5;
+    else if (FT1 <= 56.0167)
+      tmp1 = 2.6;
+    else if (FT1 <= 56.1243)
+      tmp1 = 2.7;
+    else if (FT1 <= 56.232)
+      tmp1 = 2.8;
+    else if (FT1 <= 56.3398)
+      tmp1 = 2.9;
+  } else if (FT1 <= 57.4255) {
+    if (FT1 == 56.4478)
+      tmp1 = 3;
+    else if (FT1 <= 56.5559)
+      tmp1 = 3.1;
+    else if (FT1 <= 56.6641)
+      tmp1 = 3.2;
+    else if (FT1 <= 56.7725)
+      tmp1 = 3.3;
+    else if (FT1 <= 56.881)
+      tmp1 = 3.4;
+    else if (FT1 <= 56.9896)
+      tmp1 = 3.5;
+    else if (FT1 <= 57.0984)
+      tmp1 = 3.6;
+    else if (FT1 <= 57.2073)
+      tmp1 = 3.7;
+    else if (FT1 <= 57.3163)
+      tmp1 = 3.8;
+    else if (FT1 <= 57.4255)
+      tmp1 = 3.9;
+  } else if (FT1 <= 58.5244) {
+    if (FT1 == 57.5348)
+      tmp1 = 4;
+    else if (FT1 <= 57.6442)
+      tmp1 = 4.1;
+    else if (FT1 <= 57.7538)
+      tmp1 = 4.2;
+    else if (FT1 <= 57.8635)
+      tmp1 = 4.3;
+    else if (FT1 <= 57.9733)
+      tmp1 = 4.4;
+    else if (FT1 <= 58.0833)
+      tmp1 = 4.5;
+    else if (FT1 <= 58.1933)
+      tmp1 = 4.6;
+    else if (FT1 <= 58.3036)
+      tmp1 = 4.7;
+    else if (FT1 <= 58.4139)
+      tmp1 = 4.8;
+    else if (FT1 <= 58.5244)
+      tmp1 = 4.9;
+    else if (FT1 <= 58.635)
+      tmp1 = 5;
+  } else if (FT1 <= 59.6367) {
+    if (FT1 == 58.635)
+      tmp1 = 5;
+    else if (FT1 <= 58.7458)
+      tmp1 = 5.1;
+    else if (FT1 <= 58.8567)
+      tmp1 = 5.2;
+    else if (FT1 <= 58.9677)
+      tmp1 = 5.3;
+    else if (FT1 <= 59.0789)
+      tmp1 = 5.4;
+    else if (FT1 <= 59.1902)
+      tmp1 = 5.5;
+    else if (FT1 <= 59.3016)
+      tmp1 = 5.6;
+    else if (FT1 <= 59.4131)
+      tmp1 = 5.7;
+    else if (FT1 <= 59.5248)
+      tmp1 = 5.8;
+    else if (FT1 <= 59.6367)
+      tmp1 = 5.9;
+    else if (FT1 <= 59.7486)
+      tmp1 = 6;
+  } else if (FT1 <= 60.7622) {
+    if (FT1 == 59.7486)
+      tmp1 = 6;
+    else if (FT1 <= 59.8607)
+      tmp1 = 6.1;
+    else if (FT1 <= 59.9729)
+      tmp1 = 6.2;
+    else if (FT1 <= 60.0853)
+      tmp1 = 6.3;
+    else if (FT1 <= 60.1978)
+      tmp1 = 6.4;
+    else if (FT1 <= 60.3104)
+      tmp1 = 6.5;
+    else if (FT1 <= 60.4231)
+      tmp1 = 6.6;
+    else if (FT1 <= 60.536)
+      tmp1 = 6.7;
+    else if (FT1 <= 60.6491)
+      tmp1 = 6.8;
+    else if (FT1 <= 60.7622)
+      tmp1 = 6.9;
+    else if (FT1 <= 60.8755)
+      tmp1 = 7;
+  } else if (FT1 <= 61.9012) {
+    if (FT1 == 60.8755)
+      tmp1 = 7;
+    else if (FT1 <= 60.9889)
+      tmp1 = 7.1;
+    else if (FT1 <= 61.1025)
+      tmp1 = 7.2;
+    else if (FT1 <= 61.2162)
+      tmp1 = 7.3;
+    else if (FT1 <= 61.33)
+      tmp1 = 7.4;
+    else if (FT1 <= 61.444)
+      tmp1 = 7.5;
+    else if (FT1 <= 61.5581)
+      tmp1 = 7.6;
+    else if (FT1 <= 61.6723)
+      tmp1 = 7.7;
+    else if (FT1 <= 61.7867)
+      tmp1 = 7.8;
+    else if (FT1 <= 61.9012)
+      tmp1 = 7.9;
+    else if (FT1 <= 62.0158)
+      tmp1 = 8;
+  } else if (FT1 <= 63.0535) {
+    if (FT1 == 62.0158)
+      tmp1 = 8;
+    else if (FT1 <= 62.1306)
+      tmp1 = 8.1;
+    else if (FT1 <= 62.2455)
+      tmp1 = 8.2;
+    else if (FT1 <= 62.3605)
+      tmp1 = 8.3;
+    else if (FT1 <= 62.4757)
+      tmp1 = 8.4;
+    else if (FT1 <= 62.591)
+      tmp1 = 8.5;
+    else if (FT1 <= 62.7064)
+      tmp1 = 8.6;
+    else if (FT1 <= 62.822)
+      tmp1 = 8.7;
+    else if (FT1 <= 62.9377)
+      tmp1 = 8.8;
+    else if (FT1 <= 63.0535)
+      tmp1 = 8.9;
+    else if (FT1 <= 63.1695)
+      tmp1 = 9;
+  } else if (FT1 <= 64.2193) {
+    if (FT1 == 63.1695)
+      tmp1 = 9;
+    else if (FT1 <= 63.2856)
+      tmp1 = 9.1;
+    else if (FT1 <= 63.4019)
+      tmp1 = 9.2;
+    else if (FT1 <= 63.5182)
+      tmp1 = 9.3;
+    else if (FT1 <= 63.6347)
+      tmp1 = 9.4;
+    else if (FT1 <= 63.7514)
+      tmp1 = 9.5;
+    else if (FT1 <= 63.8682)
+      tmp1 = 9.6;
+    else if (FT1 <= 63.9851)
+      tmp1 = 9.7;
+    else if (FT1 <= 64.1022)
+      tmp1 = 9.8;
+    else if (FT1 <= 64.2193)
+      tmp1 = 9.9;
+    else if (FT1 <= 64.3367)
+      tmp1 = 10;
+  } else if (FT1 <= 65.3987) {
+    if (FT1 == 64.3367)
+      tmp1 = 10;
+    else if (FT1 <= 64.4541)
+      tmp1 = 10.1;
+    else if (FT1 <= 64.5717)
+      tmp1 = 10.2;
+    else if (FT1 <= 64.6895)
+      tmp1 = 10.3;
+    else if (FT1 <= 64.8073)
+      tmp1 = 10.4;
+    else if (FT1 <= 64.9253)
+      tmp1 = 10.5;
+    else if (FT1 <= 65.0435)
+      tmp1 = 10.6;
+    else if (FT1 <= 65.1617)
+      tmp1 = 10.7;
+    else if (FT1 <= 65.2801)
+      tmp1 = 10.8;
+    else if (FT1 <= 65.3987)
+      tmp1 = 10.9;
+    else if (FT1 <= 65.5173)
+      tmp1 = 11;
+  } else if (FT1 <= 66.5915) {
+    if (FT1 == 65.5173)
+      tmp1 = 11;
+    else if (FT1 <= 65.6362)
+      tmp1 = 11.1;
+    else if (FT1 <= 65.7551)
+      tmp1 = 11.2;
+    else if (FT1 <= 65.8742)
+      tmp1 = 11.3;
+    else if (FT1 <= 65.9934)
+      tmp1 = 11.4;
+    else if (FT1 <= 66.1128)
+      tmp1 = 11.5;
+    else if (FT1 <= 66.2323)
+      tmp1 = 11.6;
+    else if (FT1 <= 66.3519)
+      tmp1 = 11.7;
+    else if (FT1 <= 66.4716)
+      tmp1 = 11.8;
+    else if (FT1 <= 66.5915)
+      tmp1 = 11.9;
+    else if (FT1 <= 66.7116)
+      tmp1 = 12;
+  } else if (FT1 <= 67.798) {
+    if (FT1 == 66.7116)
+      tmp1 = 12;
+    else if (FT1 <= 66.8317)
+      tmp1 = 12.1;
+    else if (FT1 <= 66.952)
+      tmp1 = 12.2;
+    else if (FT1 <= 67.0725)
+      tmp1 = 12.3;
+    else if (FT1 <= 67.1931)
+      tmp1 = 12.4;
+    else if (FT1 <= 67.3138)
+      tmp1 = 12.5;
+    else if (FT1 <= 67.4346)
+      tmp1 = 12.6;
+    else if (FT1 <= 67.5556)
+      tmp1 = 12.7;
+    else if (FT1 <= 67.6767)
+      tmp1 = 12.8;
+    else if (FT1 <= 67.798)
+      tmp1 = 12.9;
+    else if (FT1 <= 67.9194)
+      tmp1 = 13;
+  } else if (FT1 <= 69.0181) {
+    if (FT1 == 67.9194)
+      tmp1 = 13;
+    else if (FT1 <= 68.0409)
+      tmp1 = 13.1;
+    else if (FT1 <= 68.1626)
+      tmp1 = 13.2;
+    else if (FT1 <= 68.2844)
+      tmp1 = 13.3;
+    else if (FT1 <= 68.4063)
+      tmp1 = 13.4;
+    else if (FT1 <= 68.5284)
+      tmp1 = 13.5;
+    else if (FT1 <= 68.6506)
+      tmp1 = 13.6;
+    else if (FT1 <= 68.773)
+      tmp1 = 13.7;
+    else if (FT1 <= 68.8954)
+      tmp1 = 13.8;
+    else if (FT1 <= 69.0181)
+      tmp1 = 13.9;
+    else if (FT1 <= 69.1408)
+      tmp1 = 14;
+  } else if (FT1 <= 70.2518) {
+    if (FT1 == 69.1408)
+      tmp1 = 14;
+    else if (FT1 <= 69.2637)
+      tmp1 = 14.1;
+    else if (FT1 <= 69.3867)
+      tmp1 = 14.2;
+    else if (FT1 <= 69.5099)
+      tmp1 = 14.3;
+    else if (FT1 <= 69.6332)
+      tmp1 = 14.4;
+    else if (FT1 <= 69.7567)
+      tmp1 = 14.5;
+    else if (FT1 <= 69.8802)
+      tmp1 = 14.6;
+    else if (FT1 <= 70.0039)
+      tmp1 = 14.7;
+    else if (FT1 <= 70.1278)
+      tmp1 = 14.8;
+    else if (FT1 <= 70.2518)
+      tmp1 = 14.9;
+    else if (FT1 <= 70.3759)
+      tmp1 = 15;
+  } else if (FT1 <= 71.4992) {
+    if (FT1 == 70.3759)
+      tmp1 = 15;
+    else if (FT1 <= 70.5002)
+      tmp1 = 15.1;
+    else if (FT1 <= 70.6246)
+      tmp1 = 15.2;
+    else if (FT1 <= 70.7491)
+      tmp1 = 15.3;
+    else if (FT1 <= 70.8738)
+      tmp1 = 15.4;
+    else if (FT1 <= 70.9986)
+      tmp1 = 15.5;
+    else if (FT1 <= 71.1235)
+      tmp1 = 15.6;
+    else if (FT1 <= 71.2486)
+      tmp1 = 15.7;
+    else if (FT1 <= 71.3738)
+      tmp1 = 15.8;
+    else if (FT1 <= 71.4992)
+      tmp1 = 15.9;
+    else if (FT1 <= 71.6247)
+      tmp1 = 16;
+  } else if (FT1 <= 72.7603) {
+    if (FT1 == 71.6247)
+      tmp1 = 16;
+    else if (FT1 <= 71.7503)
+      tmp1 = 16.1;
+    else if (FT1 <= 71.8761)
+      tmp1 = 16.2;
+    else if (FT1 <= 72.002)
+      tmp1 = 16.3;
+    else if (FT1 <= 72.128)
+      tmp1 = 16.4;
+    else if (FT1 <= 72.2542)
+      tmp1 = 16.5;
+    else if (FT1 <= 72.3805)
+      tmp1 = 16.6;
+    else if (FT1 <= 72.507)
+      tmp1 = 16.7;
+    else if (FT1 <= 72.6336)
+      tmp1 = 16.8;
+    else if (FT1 <= 72.7603)
+      tmp1 = 16.9;
+  } else if (FT1 <= 74.0352) {
+    if (FT1 == 72.8872)
+      tmp1 = 17;
+    else if (FT1 <= 73.0142)
+      tmp1 = 17.1;
+    else if (FT1 <= 73.1414)
+      tmp1 = 17.2;
+    else if (FT1 <= 73.2686)
+      tmp1 = 17.3;
+    else if (FT1 <= 73.3961)
+      tmp1 = 17.4;
+    else if (FT1 <= 73.5236)
+      tmp1 = 17.5;
+    else if (FT1 <= 73.6513)
+      tmp1 = 17.6;
+    else if (FT1 <= 73.7792)
+      tmp1 = 17.7;
+    else if (FT1 <= 73.9071)
+      tmp1 = 17.8;
+    else if (FT1 <= 74.0352)
+      tmp1 = 17.9;
+  } else if (FT1 <= 75.3239) {
+    if (FT1 == 74.1635)
+      tmp1 = 18;
+    else if (FT1 <= 74.2919)
+      tmp1 = 18.1;
+    else if (FT1 <= 74.4204)
+      tmp1 = 18.2;
+    else if (FT1 <= 74.5491)
+      tmp1 = 18.3;
+    else if (FT1 <= 74.6779)
+      tmp1 = 18.4;
+    else if (FT1 <= 74.8068)
+      tmp1 = 18.5;
+    else if (FT1 <= 74.9359)
+      tmp1 = 18.6;
+    else if (FT1 <= 75.0651)
+      tmp1 = 18.7;
+    else if (FT1 <= 75.1944)
+      tmp1 = 18.8;
+    else if (FT1 <= 75.3239)
+      tmp1 = 18.9;
+  } else if (FT1 <= 76.6264) {
+    if (FT1 == 75.4536)
+      tmp1 = 19;
+    else if (FT1 <= 75.5833)
+      tmp1 = 19.1;
+    else if (FT1 <= 75.7132)
+      tmp1 = 19.2;
+    else if (FT1 <= 75.8433)
+      tmp1 = 19.3;
+    else if (FT1 <= 75.9734)
+      tmp1 = 19.4;
+    else if (FT1 <= 76.1038)
+      tmp1 = 19.5;
+    else if (FT1 <= 76.2342)
+      tmp1 = 19.6;
+    else if (FT1 <= 76.3648)
+      tmp1 = 19.7;
+    else if (FT1 <= 76.4956)
+      tmp1 = 19.8;
+    else if (FT1 <= 76.6264)
+      tmp1 = 19.9;
+  } else if (FT1 <= 77.9428) {
+    if (FT1 == 76.7575)
+      tmp1 = 20;
+    else if (FT1 <= 76.8886)
+      tmp1 = 20.1;
+    else if (FT1 <= 77.0199)
+      tmp1 = 20.2;
+    else if (FT1 <= 77.1513)
+      tmp1 = 20.3;
+    else if (FT1 <= 77.2829)
+      tmp1 = 20.4;
+    else if (FT1 <= 77.4146)
+      tmp1 = 20.5;
+    else if (FT1 <= 77.5464)
+      tmp1 = 20.6;
+    else if (FT1 <= 77.6784)
+      tmp1 = 20.7;
+    else if (FT1 <= 77.8106)
+      tmp1 = 20.8;
+    else if (FT1 <= 77.9428)
+      tmp1 = 20.9;
+  } else if (FT1 <= 79.2731) {
+    if (FT1 == 78.0752)
+      tmp1 = 21;
+    else if (FT1 <= 78.2078)
+      tmp1 = 21.1;
+    else if (FT1 <= 78.3404)
+      tmp1 = 21.2;
+    else if (FT1 <= 78.4732)
+      tmp1 = 21.3;
+    else if (FT1 <= 78.6062)
+      tmp1 = 21.4;
+    else if (FT1 <= 78.7393)
+      tmp1 = 21.5;
+    else if (FT1 <= 78.8725)
+      tmp1 = 21.6;
+    else if (FT1 <= 79.0059)
+      tmp1 = 21.7;
+    else if (FT1 <= 79.1394)
+      tmp1 = 21.8;
+    else if (FT1 <= 79.2731)
+      tmp1 = 21.9;
+  } else if (FT1 <= 80.6172) {
+    if (FT1 == 79.4069)
+      tmp1 = 22;
+    else if (FT1 <= 79.5408)
+      tmp1 = 22.1;
+    else if (FT1 <= 79.6749)
+      tmp1 = 22.2;
+    else if (FT1 <= 79.8091)
+      tmp1 = 22.3;
+    else if (FT1 <= 79.9434)
+      tmp1 = 22.4;
+    else if (FT1 <= 80.0779)
+      tmp1 = 22.5;
+    else if (FT1 <= 80.2125)
+      tmp1 = 22.6;
+    else if (FT1 <= 80.3473)
+      tmp1 = 22.7;
+    else if (FT1 <= 80.4822)
+      tmp1 = 22.8;
+    else if (FT1 <= 80.6172)
+      tmp1 = 22.9;
+  } else if (FT1 <= 81.9754) {
+    if (FT1 == 80.7524)
+      tmp1 = 23;
+    else if (FT1 <= 80.8878)
+      tmp1 = 23.1;
+    else if (FT1 <= 81.0232)
+      tmp1 = 23.2;
+    else if (FT1 <= 81.1588)
+      tmp1 = 23.3;
+    else if (FT1 <= 81.2946)
+      tmp1 = 23.4;
+    else if (FT1 <= 81.4304)
+      tmp1 = 23.5;
+    else if (FT1 <= 81.5665)
+      tmp1 = 23.6;
+    else if (FT1 <= 81.7026)
+      tmp1 = 23.7;
+    else if (FT1 <= 81.8389)
+      tmp1 = 23.8;
+    else if (FT1 <= 81.9754)
+      tmp1 = 23.9;
+  } else if (FT1 <= 83.3475) {
+    if (FT1 == 82.112)
+      tmp1 = 24;
+    else if (FT1 <= 82.2487)
+      tmp1 = 24.1;
+    else if (FT1 <= 82.3855)
+      tmp1 = 24.2;
+    else if (FT1 <= 82.5225)
+      tmp1 = 24.3;
+    else if (FT1 <= 82.6597)
+      tmp1 = 24.4;
+    else if (FT1 <= 82.7969)
+      tmp1 = 24.5;
+    else if (FT1 <= 82.9344)
+      tmp1 = 24.6;
+    else if (FT1 <= 83.0719)
+      tmp1 = 24.7;
+    else if (FT1 <= 83.2096)
+      tmp1 = 24.8;
+    else if (FT1 <= 83.3475)
+      tmp1 = 24.9;
+  } else if (FT1 <= 84.7336) {
+    if (FT1 == 83.4854)
+      tmp1 = 25;
+    else if (FT1 <= 83.6236)
+      tmp1 = 25.1;
+    else if (FT1 <= 83.7618)
+      tmp1 = 25.2;
+    else if (FT1 <= 83.9002)
+      tmp1 = 25.3;
+    else if (FT1 <= 84.0388)
+      tmp1 = 25.4;
+    else if (FT1 <= 84.1774)
+      tmp1 = 25.5;
+    else if (FT1 <= 84.3163)
+      tmp1 = 25.6;
+    else if (FT1 <= 84.4552)
+      tmp1 = 25.7;
+    else if (FT1 <= 84.5943)
+      tmp1 = 25.8;
+    else if (FT1 <= 84.7336)
+      tmp1 = 25.9;
+  } else if (FT1 <= 86.1337) {
+    if (FT1 == 84.8729)
+      tmp1 = 26;
+    else if (FT1 <= 85.0125)
+      tmp1 = 26.1;
+    else if (FT1 <= 85.1521)
+      tmp1 = 26.2;
+    else if (FT1 <= 85.2919)
+      tmp1 = 26.3;
+    else if (FT1 <= 85.4319)
+      tmp1 = 26.4;
+    else if (FT1 <= 85.572)
+      tmp1 = 26.5;
+    else if (FT1 <= 85.7122)
+      tmp1 = 26.6;
+    else if (FT1 <= 85.8525)
+      tmp1 = 26.7;
+    else if (FT1 <= 85.993)
+      tmp1 = 26.8;
+    else if (FT1 <= 86.1337)
+      tmp1 = 26.9;
+  } else if (FT1 <= 87.5479) {
+    if (FT1 == 86.2745)
+      tmp1 = 27;
+    else if (FT1 <= 86.4154)
+      tmp1 = 27.1;
+    else if (FT1 <= 86.5565)
+      tmp1 = 27.2;
+    else if (FT1 <= 86.6977)
+      tmp1 = 27.3;
+    else if (FT1 <= 86.839)
+      tmp1 = 27.4;
+    else if (FT1 <= 86.9805)
+      tmp1 = 27.5;
+    else if (FT1 <= 87.1221)
+      tmp1 = 27.6;
+    else if (FT1 <= 87.2639)
+      tmp1 = 27.7;
+    else if (FT1 <= 87.4058)
+      tmp1 = 27.8;
+    else if (FT1 <= 87.5479)
+      tmp1 = 27.9;
+  } else if (FT1 <= 88.9761) {
+    if (FT1 == 87.6901)
+      tmp1 = 28;
+    else if (FT1 <= 87.8324)
+      tmp1 = 28.1;
+    else if (FT1 <= 87.9749)
+      tmp1 = 28.2;
+    else if (FT1 <= 88.1175)
+      tmp1 = 28.3;
+    else if (FT1 <= 88.2602)
+      tmp1 = 28.4;
+    else if (FT1 <= 88.4031)
+      tmp1 = 28.5;
+    else if (FT1 <= 88.5462)
+      tmp1 = 28.6;
+    else if (FT1 <= 88.6893)
+      tmp1 = 28.7;
+    else if (FT1 <= 88.8327)
+      tmp1 = 28.8;
+    else if (FT1 <= 88.9761)
+      tmp1 = 28.9;
+  } else if (FT1 <= 90.4185) {
+    if (FT1 == 89.1197)
+      tmp1 = 29;
+    else if (FT1 <= 89.2635)
+      tmp1 = 29.1;
+    else if (FT1 <= 89.4073)
+      tmp1 = 29.2;
+    else if (FT1 <= 89.5514)
+      tmp1 = 29.3;
+    else if (FT1 <= 89.6955)
+      tmp1 = 29.4;
+    else if (FT1 <= 89.8398)
+      tmp1 = 29.5;
+    else if (FT1 <= 89.9843)
+      tmp1 = 29.6;
+    else if (FT1 <= 90.1289)
+      tmp1 = 29.7;
+    else if (FT1 <= 90.2736)
+      tmp1 = 29.8;
+    else if (FT1 <= 90.4185)
+      tmp1 = 29.9;
+  } else if (FT1 <= 91.875) {
+    if (FT1 == 90.5635)
+      tmp1 = 30;
+    else if (FT1 <= 90.7086)
+      tmp1 = 30.1;
+    else if (FT1 <= 90.8539)
+      tmp1 = 30.2;
+    else if (FT1 <= 90.9994)
+      tmp1 = 30.3;
+    else if (FT1 <= 91.145)
+      tmp1 = 30.4;
+    else if (FT1 <= 91.2907)
+      tmp1 = 30.5;
+    else if (FT1 <= 91.4365)
+      tmp1 = 30.6;
+    else if (FT1 <= 91.5825)
+      tmp1 = 30.7;
+    else if (FT1 <= 91.7287)
+      tmp1 = 30.8;
+    else if (FT1 <= 91.875)
+      tmp1 = 30.9;
+  } else if (FT1 <= 93.3456) {
+    if (FT1 == 92.0214)
+      tmp1 = 31;
+    else if (FT1 <= 92.168)
+      tmp1 = 31.1;
+    else if (FT1 <= 92.3147)
+      tmp1 = 31.2;
+    else if (FT1 <= 92.4615)
+      tmp1 = 31.3;
+    else if (FT1 <= 92.6085)
+      tmp1 = 31.4;
+    else if (FT1 <= 92.7556)
+      tmp1 = 31.5;
+    else if (FT1 <= 92.9029)
+      tmp1 = 31.6;
+    else if (FT1 <= 93.0503)
+      tmp1 = 31.7;
+    else if (FT1 <= 93.1979)
+      tmp1 = 31.8;
+    else if (FT1 <= 93.3456)
+      tmp1 = 31.9;
+  } else if (FT1 <= 94.8304) {
+    if (FT1 == 93.4934)
+      tmp1 = 32;
+    else if (FT1 <= 93.6414)
+      tmp1 = 32.1;
+    else if (FT1 <= 93.7896)
+      tmp1 = 32.2;
+    else if (FT1 <= 93.9378)
+      tmp1 = 32.3;
+    else if (FT1 <= 94.0862)
+      tmp1 = 32.4;
+    else if (FT1 <= 94.2348)
+      tmp1 = 32.5;
+    else if (FT1 <= 94.3835)
+      tmp1 = 32.6;
+    else if (FT1 <= 94.5323)
+      tmp1 = 32.7;
+    else if (FT1 <= 94.6813)
+      tmp1 = 32.8;
+    else if (FT1 <= 94.8304)
+      tmp1 = 32.9;
+  } else if (FT1 <= 96.3294) {
+    if (FT1 == 94.9797)
+      tmp1 = 33;
+    else if (FT1 <= 95.1291)
+      tmp1 = 33.1;
+    else if (FT1 <= 95.2786)
+      tmp1 = 33.2;
+    else if (FT1 <= 95.4283)
+      tmp1 = 33.3;
+    else if (FT1 <= 95.5781)
+      tmp1 = 33.4;
+    else if (FT1 <= 95.7281)
+      tmp1 = 33.5;
+    else if (FT1 <= 95.8782)
+      tmp1 = 33.6;
+    else if (FT1 <= 96.0285)
+      tmp1 = 33.7;
+    else if (FT1 <= 96.1789)
+      tmp1 = 33.8;
+    else if (FT1 <= 96.3294)
+      tmp1 = 33.9;
+  } else if (FT1 <= 97.8426) {
+    if (FT1 == 96.4801)
+      tmp1 = 34;
+    else if (FT1 <= 96.6309)
+      tmp1 = 34.1;
+    else if (FT1 <= 96.7819)
+      tmp1 = 34.2;
+    else if (FT1 <= 96.933)
+      tmp1 = 34.3;
+    else if (FT1 <= 97.0842)
+      tmp1 = 34.4;
+    else if (FT1 <= 97.2356)
+      tmp1 = 34.5;
+    else if (FT1 <= 97.3871)
+      tmp1 = 34.6;
+    else if (FT1 <= 97.5388)
+      tmp1 = 34.7;
+    else if (FT1 <= 97.6906)
+      tmp1 = 34.8;
+    else if (FT1 <= 97.8426)
+      tmp1 = 34.9;
+  } else if (FT1 <= 99.37) {
+    if (FT1 == 97.9947)
+      tmp1 = 35;
+    else if (FT1 <= 98.147)
+      tmp1 = 35.1;
+    else if (FT1 <= 98.2993)
+      tmp1 = 35.2;
+    else if (FT1 <= 98.4519)
+      tmp1 = 35.3;
+    else if (FT1 <= 98.6045)
+      tmp1 = 35.4;
+    else if (FT1 <= 98.7574)
+      tmp1 = 35.5;
+    else if (FT1 <= 98.9103)
+      tmp1 = 35.6;
+    else if (FT1 <= 99.0634)
+      tmp1 = 35.7;
+    else if (FT1 <= 99.2167)
+      tmp1 = 35.8;
+    else if (FT1 <= 99.37)
+      tmp1 = 35.9;
+  } else if (FT1 <= 100.912) {
+    if (FT1 == 99.5236)
+      tmp1 = 36;
+    else if (FT1 <= 99.6772)
+      tmp1 = 36.1;
+    else if (FT1 <= 99.831)
+      tmp1 = 36.2;
+    else if (FT1 <= 99.985)
+      tmp1 = 36.3;
+    else if (FT1 <= 100.139)
+      tmp1 = 36.4;
+    else if (FT1 <= 100.293)
+      tmp1 = 36.5;
+    else if (FT1 <= 100.448)
+      tmp1 = 36.6;
+    else if (FT1 <= 100.602)
+      tmp1 = 36.7;
+    else if (FT1 <= 100.757)
+      tmp1 = 36.8;
+    else if (FT1 <= 100.912)
+      tmp1 = 36.9;
+  } else if (FT1 <= 102.468) {
+    if (FT1 == 101.067)
+      tmp1 = 37;
+    else if (FT1 <= 101.222)
+      tmp1 = 37.1;
+    else if (FT1 <= 101.377)
+      tmp1 = 37.2;
+    else if (FT1 <= 101.532)
+      tmp1 = 37.3;
+    else if (FT1 <= 101.688)
+      tmp1 = 37.4;
+    else if (FT1 <= 101.844)
+      tmp1 = 37.5;
+    else if (FT1 <= 101.999)
+      tmp1 = 37.6;
+    else if (FT1 <= 102.155)
+      tmp1 = 37.7;
+    else if (FT1 <= 102.311)
+      tmp1 = 37.8;
+    else if (FT1 <= 102.468)
+      tmp1 = 37.9;
+  } else if (FT1 <= 104.038) {
+    if (FT1 == 102.624)
+      tmp1 = 38;
+    else if (FT1 <= 102.781)
+      tmp1 = 38.1;
+    else if (FT1 <= 102.937)
+      tmp1 = 38.2;
+    else if (FT1 <= 103.094)
+      tmp1 = 38.3;
+    else if (FT1 <= 103.251)
+      tmp1 = 38.4;
+    else if (FT1 <= 103.408)
+      tmp1 = 38.5;
+    else if (FT1 <= 103.565)
+      tmp1 = 38.6;
+    else if (FT1 <= 103.723)
+      tmp1 = 38.7;
+    else if (FT1 <= 103.88)
+      tmp1 = 38.8;
+    else if (FT1 <= 104.038)
+      tmp1 = 38.9;
+  } else if (FT1 <= 105.622) {
+    if (FT1 == 104.196)
+      tmp1 = 39;
+    else if (FT1 <= 104.354)
+      tmp1 = 39.1;
+    else if (FT1 <= 104.512)
+      tmp1 = 39.2;
+    else if (FT1 <= 104.67)
+      tmp1 = 39.3;
+    else if (FT1 <= 104.828)
+      tmp1 = 39.4;
+    else if (FT1 <= 104.987)
+      tmp1 = 39.5;
+    else if (FT1 <= 105.146)
+      tmp1 = 39.6;
+    else if (FT1 <= 105.304)
+      tmp1 = 39.7;
+    else if (FT1 <= 105.463)
+      tmp1 = 39.8;
+    else if (FT1 <= 105.622)
+      tmp1 = 39.9;
+  } else if (FT1 <= 107.221) {
+    if (FT1 == 105.782)
+      tmp1 = 40;
+    else if (FT1 <= 105.941)
+      tmp1 = 40.1;
+    else if (FT1 <= 106.101)
+      tmp1 = 40.2;
+    else if (FT1 <= 106.26)
+      tmp1 = 40.3;
+    else if (FT1 <= 106.42)
+      tmp1 = 40.4;
+    else if (FT1 <= 106.58)
+      tmp1 = 40.5;
+    else if (FT1 <= 106.74)
+      tmp1 = 40.6;
+    else if (FT1 <= 106.9)
+      tmp1 = 40.7;
+    else if (FT1 <= 107.061)
+      tmp1 = 40.8;
+    else if (FT1 <= 107.221)
+      tmp1 = 40.9;
+  } else if (FT1 <= 108.834) {
+    if (FT1 == 107.382)
+      tmp1 = 41;
+    else if (FT1 <= 107.543)
+      tmp1 = 41.1;
+    else if (FT1 <= 107.704)
+      tmp1 = 41.2;
+    else if (FT1 <= 107.865)
+      tmp1 = 41.3;
+    else if (FT1 <= 108.026)
+      tmp1 = 41.4;
+    else if (FT1 <= 108.187)
+      tmp1 = 41.5;
+    else if (FT1 <= 108.349)
+      tmp1 = 41.6;
+    else if (FT1 <= 108.511)
+      tmp1 = 41.7;
+    else if (FT1 <= 108.673)
+      tmp1 = 41.8;
+    else if (FT1 <= 108.834)
+      tmp1 = 41.9;
+  } else if (FT1 <= 110.462) {
+    if (FT1 == 108.997)
+      tmp1 = 42;
+    else if (FT1 <= 109.159)
+      tmp1 = 42.1;
+    else if (FT1 <= 109.321)
+      tmp1 = 42.2;
+    else if (FT1 <= 109.484)
+      tmp1 = 42.3;
+    else if (FT1 <= 109.646)
+      tmp1 = 42.4;
+    else if (FT1 <= 109.809)
+      tmp1 = 42.5;
+    else if (FT1 <= 109.972)
+      tmp1 = 42.6;
+    else if (FT1 <= 110.135)
+      tmp1 = 42.7;
+    else if (FT1 <= 110.299)
+      tmp1 = 42.8;
+    else if (FT1 <= 110.462)
+      tmp1 = 42.9;
+  } else if (FT1 <= 112.104) {
+    if (FT1 == 110.626)
+      tmp1 = 43;
+    else if (FT1 <= 110.789)
+      tmp1 = 43.1;
+    else if (FT1 <= 110.953)
+      tmp1 = 43.2;
+    else if (FT1 <= 111.117)
+      tmp1 = 43.3;
+    else if (FT1 <= 111.281)
+      tmp1 = 43.4;
+    else if (FT1 <= 111.445)
+      tmp1 = 43.5;
+    else if (FT1 <= 111.61)
+      tmp1 = 43.6;
+    else if (FT1 <= 111.774)
+      tmp1 = 43.7;
+    else if (FT1 <= 111.939)
+      tmp1 = 43.8;
+    else if (FT1 <= 112.104)
+      tmp1 = 43.9;
+  } else if (FT1 <= 113.76) {
+    if (FT1 == 112.269)
+      tmp1 = 44;
+    else if (FT1 <= 112.434)
+      tmp1 = 44.1;
+    else if (FT1 <= 112.599)
+      tmp1 = 44.2;
+    else if (FT1 <= 112.765)
+      tmp1 = 44.3;
+    else if (FT1 <= 112.93)
+      tmp1 = 44.4;
+    else if (FT1 <= 113.096)
+      tmp1 = 44.5;
+    else if (FT1 <= 113.262)
+      tmp1 = 44.6;
+    else if (FT1 <= 113.428)
+      tmp1 = 44.7;
+    else if (FT1 <= 113.594)
+      tmp1 = 44.8;
+    else if (FT1 <= 113.76)
+      tmp1 = 44.9;
+  } else if (FT1 <= 115.431) {
+    if (FT1 == 113.927)
+      tmp1 = 45;
+    else if (FT1 <= 114.093)
+      tmp1 = 45.1;
+    else if (FT1 <= 114.26)
+      tmp1 = 45.2;
+    else if (FT1 <= 114.427)
+      tmp1 = 45.3;
+    else if (FT1 <= 114.594)
+      tmp1 = 45.4;
+    else if (FT1 <= 114.761)
+      tmp1 = 45.5;
+    else if (FT1 <= 114.928)
+      tmp1 = 45.6;
+    else if (FT1 <= 115.096)
+      tmp1 = 45.7;
+    else if (FT1 <= 115.263)
+      tmp1 = 45.8;
+    else if (FT1 <= 115.431)
+      tmp1 = 45.9;
+  } else if (FT1 <= 117.116) {
+    if (FT1 == 115.599)
+      tmp1 = 46;
+    else if (FT1 <= 115.767)
+      tmp1 = 46.1;
+    else if (FT1 <= 115.935)
+      tmp1 = 46.2;
+    else if (FT1 <= 116.103)
+      tmp1 = 46.3;
+    else if (FT1 <= 116.272)
+      tmp1 = 46.4;
+    else if (FT1 <= 116.44)
+      tmp1 = 46.5;
+    else if (FT1 <= 116.609)
+      tmp1 = 46.6;
+    else if (FT1 <= 116.778)
+      tmp1 = 46.7;
+    else if (FT1 <= 116.947)
+      tmp1 = 46.8;
+    else if (FT1 <= 117.116)
+      tmp1 = 46.9;
+  } else if (FT1 <= 118.815) {
+    if (FT1 == 117.285)
+      tmp1 = 47;
+    else if (FT1 <= 117.455)
+      tmp1 = 47.1;
+    else if (FT1 <= 117.624)
+      tmp1 = 47.2;
+    else if (FT1 <= 117.794)
+      tmp1 = 47.3;
+    else if (FT1 <= 117.964)
+      tmp1 = 47.4;
+    else if (FT1 <= 118.134)
+      tmp1 = 47.5;
+    else if (FT1 <= 118.304)
+      tmp1 = 47.6;
+    else if (FT1 <= 118.474)
+      tmp1 = 47.7;
+    else if (FT1 <= 118.645)
+      tmp1 = 47.8;
+    else if (FT1 <= 118.815)
+      tmp1 = 47.9;
+  } else if (FT1 <= 120.529) {
+    if (FT1 == 118.986)
+      tmp1 = 48;
+    else if (FT1 <= 119.157)
+      tmp1 = 48.1;
+    else if (FT1 <= 119.328)
+      tmp1 = 48.2;
+    else if (FT1 <= 119.499)
+      tmp1 = 48.3;
+    else if (FT1 <= 119.67)
+      tmp1 = 48.4;
+    else if (FT1 <= 119.842)
+      tmp1 = 48.5;
+    else if (FT1 <= 120.014)
+      tmp1 = 48.6;
+    else if (FT1 <= 120.185)
+      tmp1 = 48.7;
+    else if (FT1 <= 120.357)
+      tmp1 = 48.8;
+    else if (FT1 <= 120.529)
+      tmp1 = 48.9;
+  } else if (FT1 <= 122.257) {
+    if (FT1 == 120.701)
+      tmp1 = 49;
+    else if (FT1 <= 120.874)
+      tmp1 = 49.1;
+    else if (FT1 <= 121.046)
+      tmp1 = 49.2;
+    else if (FT1 <= 121.219)
+      tmp1 = 49.3;
+    else if (FT1 <= 121.392)
+      tmp1 = 49.4;
+    else if (FT1 <= 121.564)
+      tmp1 = 49.5;
+    else if (FT1 <= 121.737)
+      tmp1 = 49.6;
+    else if (FT1 <= 121.911)
+      tmp1 = 49.7;
+    else if (FT1 <= 122.084)
+      tmp1 = 49.8;
+    else if (FT1 <= 122.257)
+      tmp1 = 49.9;
+  } else if (FT1 <= 124) {
+    if (FT1 == 122.431)
+      tmp1 = 50;
+    else if (FT1 <= 122.605)
+      tmp1 = 50.1;
+    else if (FT1 <= 122.779)
+      tmp1 = 50.2;
+    else if (FT1 <= 122.953)
+      tmp1 = 50.3;
+    else if (FT1 <= 123.127)
+      tmp1 = 50.4;
+    else if (FT1 <= 123.301)
+      tmp1 = 50.5;
+    else if (FT1 <= 123.476)
+      tmp1 = 50.6;
+    else if (FT1 <= 123.651)
+      tmp1 = 50.7;
+    else if (FT1 <= 123.825)
+      tmp1 = 50.8;
+    else if (FT1 <= 124)
+      tmp1 = 50.9;
+  } else if (FT1 <= 125.757) {
+    if (FT1 == 124.175)
+      tmp1 = 51;
+    else if (FT1 <= 124.35)
+      tmp1 = 51.1;
+    else if (FT1 <= 124.526)
+      tmp1 = 51.2;
+    else if (FT1 <= 124.701)
+      tmp1 = 51.3;
+    else if (FT1 <= 124.877)
+      tmp1 = 51.4;
+    else if (FT1 <= 125.053)
+      tmp1 = 51.5;
+    else if (FT1 <= 125.229)
+      tmp1 = 51.6;
+    else if (FT1 <= 125.405)
+      tmp1 = 51.7;
+    else if (FT1 <= 125.581)
+      tmp1 = 51.8;
+    else if (FT1 <= 125.757)
+      tmp1 = 51.9;
+  } else if (FT1 <= 127.529) {
+    if (FT1 == 125.934)
+      tmp1 = 52;
+    else if (FT1 <= 126.111)
+      tmp1 = 52.1;
+    else if (FT1 <= 126.287)
+      tmp1 = 52.2;
+    else if (FT1 <= 126.464)
+      tmp1 = 52.3;
+    else if (FT1 <= 126.641)
+      tmp1 = 52.4;
+    else if (FT1 <= 126.819)
+      tmp1 = 52.5;
+    else if (FT1 <= 126.996)
+      tmp1 = 52.6;
+    else if (FT1 <= 127.174)
+      tmp1 = 52.7;
+    else if (FT1 <= 127.351)
+      tmp1 = 52.8;
+    else if (FT1 <= 127.529)
+      tmp1 = 52.9;
+  } else if (FT1 <= 129.315) {
+    if (FT1 == 127.707)
+      tmp1 = 53;
+    else if (FT1 <= 127.885)
+      tmp1 = 53.1;
+    else if (FT1 <= 128.063)
+      tmp1 = 53.2;
+    else if (FT1 <= 128.242)
+      tmp1 = 53.3;
+    else if (FT1 <= 128.42)
+      tmp1 = 53.4;
+    else if (FT1 <= 128.599)
+      tmp1 = 53.5;
+    else if (FT1 <= 128.778)
+      tmp1 = 53.6;
+    else if (FT1 <= 128.957)
+      tmp1 = 53.7;
+    else if (FT1 <= 129.136)
+      tmp1 = 53.8;
+    else if (FT1 <= 129.315)
+      tmp1 = 53.9;
+  } else if (FT1 <= 131.116) {
+    if (FT1 == 129.494)
+      tmp1 = 54;
+    else if (FT1 <= 129.674)
+      tmp1 = 54.1;
+    else if (FT1 <= 129.854)
+      tmp1 = 54.2;
+    else if (FT1 <= 130.034)
+      tmp1 = 54.3;
+    else if (FT1 <= 130.214)
+      tmp1 = 54.4;
+    else if (FT1 <= 130.394)
+      tmp1 = 54.5;
+    else if (FT1 <= 130.574)
+      tmp1 = 54.6;
+    else if (FT1 <= 130.754)
+      tmp1 = 54.7;
+    else if (FT1 <= 130.935)
+      tmp1 = 54.8;
+    else if (FT1 <= 131.116)
+      tmp1 = 54.9;
+  } else if (FT1 <= 132.931) {
+    if (FT1 == 131.296)
+      tmp1 = 55;
+    else if (FT1 <= 131.477)
+      tmp1 = 55.1;
+    else if (FT1 <= 131.659)
+      tmp1 = 55.2;
+    else if (FT1 <= 131.84)
+      tmp1 = 55.3;
+    else if (FT1 <= 132.021)
+      tmp1 = 55.4;
+    else if (FT1 <= 132.203)
+      tmp1 = 55.5;
+    else if (FT1 <= 132.385)
+      tmp1 = 55.6;
+    else if (FT1 <= 132.566)
+      tmp1 = 55.7;
+    else if (FT1 <= 132.749)
+      tmp1 = 55.8;
+    else if (FT1 <= 132.931)
+      tmp1 = 55.9;
+  } else if (FT1 <= 134.76) {
+    if (FT1 == 133.113)
+      tmp1 = 56;
+    else if (FT1 <= 133.295)
+      tmp1 = 56.1;
+    else if (FT1 <= 133.478)
+      tmp1 = 56.2;
+    else if (FT1 <= 133.661)
+      tmp1 = 56.3;
+    else if (FT1 <= 133.844)
+      tmp1 = 56.4;
+    else if (FT1 <= 134.027)
+      tmp1 = 56.5;
+    else if (FT1 <= 134.21)
+      tmp1 = 56.6;
+    else if (FT1 <= 134.393)
+      tmp1 = 56.7;
+    else if (FT1 <= 134.577)
+      tmp1 = 56.8;
+    else if (FT1 <= 134.76)
+      tmp1 = 56.9;
+  } else if (FT1 <= 136.604) {
+    if (FT1 == 134.944)
+      tmp1 = 57;
+    else if (FT1 <= 135.128)
+      tmp1 = 57.1;
+    else if (FT1 <= 135.312)
+      tmp1 = 57.2;
+    else if (FT1 <= 135.496)
+      tmp1 = 57.3;
+    else if (FT1 <= 135.68)
+      tmp1 = 57.4;
+    else if (FT1 <= 135.865)
+      tmp1 = 57.5;
+    else if (FT1 <= 136.049)
+      tmp1 = 57.6;
+    else if (FT1 <= 136.234)
+      tmp1 = 57.7;
+    else if (FT1 <= 136.419)
+      tmp1 = 57.8;
+    else if (FT1 <= 136.604)
+      tmp1 = 57.9;
+  } else if (FT1 <= 138.463) {
+    if (FT1 == 136.789)
+      tmp1 = 58;
+    else if (FT1 <= 136.975)
+      tmp1 = 58.1;
+    else if (FT1 <= 137.16)
+      tmp1 = 58.2;
+    else if (FT1 <= 137.346)
+      tmp1 = 58.3;
+    else if (FT1 <= 137.532)
+      tmp1 = 58.4;
+    else if (FT1 <= 137.717)
+      tmp1 = 58.5;
+    else if (FT1 <= 137.904)
+      tmp1 = 58.6;
+    else if (FT1 <= 138.09)
+      tmp1 = 58.7;
+    else if (FT1 <= 138.276)
+      tmp1 = 58.8;
+    else if (FT1 <= 138.463)
+      tmp1 = 58.9;
+  } else if (FT1 <= 140.336) {
+    if (FT1 == 138.649)
+      tmp1 = 59;
+    else if (FT1 <= 138.836)
+      tmp1 = 59.1;
+    else if (FT1 <= 139.023)
+      tmp1 = 59.2;
+    else if (FT1 <= 139.21)
+      tmp1 = 59.3;
+    else if (FT1 <= 139.397)
+      tmp1 = 59.4;
+    else if (FT1 <= 139.585)
+      tmp1 = 59.5;
+    else if (FT1 <= 139.772)
+      tmp1 = 59.6;
+    else if (FT1 <= 139.96)
+      tmp1 = 59.7;
+    else if (FT1 <= 140.148)
+      tmp1 = 59.8;
+    else if (FT1 <= 140.336)
+      tmp1 = 59.9;
+  } else if (FT1 <= 142.223) {
+    if (FT1 == 140.524)
+      tmp1 = 60;
+    else if (FT1 <= 140.712)
+      tmp1 = 60.1;
+    else if (FT1 <= 140.9)
+      tmp1 = 60.2;
+    else if (FT1 <= 141.089)
+      tmp1 = 60.3;
+    else if (FT1 <= 141.277)
+      tmp1 = 60.4;
+    else if (FT1 <= 141.466)
+      tmp1 = 60.5;
+    else if (FT1 <= 141.655)
+      tmp1 = 60.6;
+    else if (FT1 <= 141.844)
+      tmp1 = 60.7;
+    else if (FT1 <= 142.034)
+      tmp1 = 60.8;
+    else if (FT1 <= 142.223)
+      tmp1 = 60.9;
+  } else if (FT1 <= 144.125) {
+    if (FT1 == 142.412)
+      tmp1 = 61;
+    else if (FT1 <= 142.602)
+      tmp1 = 61.1;
+    else if (FT1 <= 142.792)
+      tmp1 = 61.2;
+    else if (FT1 <= 142.982)
+      tmp1 = 61.3;
+    else if (FT1 <= 143.172)
+      tmp1 = 61.4;
+    else if (FT1 <= 143.362)
+      tmp1 = 61.5;
+    else if (FT1 <= 143.553)
+      tmp1 = 61.6;
+    else if (FT1 <= 143.743)
+      tmp1 = 61.7;
+    else if (FT1 <= 143.934)
+      tmp1 = 61.8;
+    else if (FT1 <= 144.125)
+      tmp1 = 61.9;
+  } else if (FT1 <= 146.041) {
+    if (FT1 == 144.316)
+      tmp1 = 62;
+    else if (FT1 <= 144.507)
+      tmp1 = 62.1;
+    else if (FT1 <= 144.698)
+      tmp1 = 62.2;
+    else if (FT1 <= 144.89)
+      tmp1 = 62.3;
+    else if (FT1 <= 145.081)
+      tmp1 = 62.4;
+    else if (FT1 <= 145.273)
+      tmp1 = 62.5;
+    else if (FT1 <= 145.465)
+      tmp1 = 62.6;
+    else if (FT1 <= 145.657)
+      tmp1 = 62.7;
+    else if (FT1 <= 145.849)
+      tmp1 = 62.8;
+    else if (FT1 <= 146.041)
+      tmp1 = 62.9;
+  } else if (FT1 <= 147.972) {
+    if (FT1 == 146.234)
+      tmp1 = 63;
+    else if (FT1 <= 146.426)
+      tmp1 = 63.1;
+    else if (FT1 <= 146.619)
+      tmp1 = 63.2;
+    else if (FT1 <= 146.812)
+      tmp1 = 63.3;
+    else if (FT1 <= 147.005)
+      tmp1 = 63.4;
+    else if (FT1 <= 147.198)
+      tmp1 = 63.5;
+    else if (FT1 <= 147.391)
+      tmp1 = 63.6;
+    else if (FT1 <= 147.585)
+      tmp1 = 63.7;
+    else if (FT1 <= 147.778)
+      tmp1 = 63.8;
+    else if (FT1 <= 147.972)
+      tmp1 = 63.9;
+  } else if (FT1 <= 149.918) {
+    if (FT1 == 148.166)
+      tmp1 = 64;
+    else if (FT1 <= 148.36)
+      tmp1 = 64.1;
+    else if (FT1 <= 148.554)
+      tmp1 = 64.2;
+    else if (FT1 <= 148.749)
+      tmp1 = 64.3;
+    else if (FT1 <= 148.943)
+      tmp1 = 64.4;
+    else if (FT1 <= 149.138)
+      tmp1 = 64.5;
+    else if (FT1 <= 149.332)
+      tmp1 = 64.6;
+    else if (FT1 <= 149.527)
+      tmp1 = 64.7;
+    else if (FT1 <= 149.722)
+      tmp1 = 64.8;
+    else if (FT1 <= 149.918)
+      tmp1 = 64.9;
+    else if (FT1 <= 150.113)
+      tmp1 = 65;
+  } else if (FT1 <= 151.877) {
+    if (FT1 == 150.113)
+      tmp1 = 65;
+    else if (FT1 <= 150.308)
+      tmp1 = 65.1;
+    else if (FT1 <= 150.504)
+      tmp1 = 65.2;
+    else if (FT1 <= 150.7)
+      tmp1 = 65.3;
+    else if (FT1 <= 150.896)
+      tmp1 = 65.4;
+    else if (FT1 <= 151.092)
+      tmp1 = 65.5;
+    else if (FT1 <= 151.288)
+      tmp1 = 65.6;
+    else if (FT1 <= 151.484)
+      tmp1 = 65.7;
+    else if (FT1 <= 151.681)
+      tmp1 = 65.8;
+    else if (FT1 <= 151.877)
+      tmp1 = 65.9;
+    else if (FT1 <= 152.074)
+      tmp1 = 66;
+  } else if (FT1 <= 153.852) {
+    if (FT1 == 152.074)
+      tmp1 = 66;
+    else if (FT1 <= 152.271)
+      tmp1 = 66.1;
+    else if (FT1 <= 152.468)
+      tmp1 = 66.2;
+    else if (FT1 <= 152.666)
+      tmp1 = 66.3;
+    else if (FT1 <= 152.863)
+      tmp1 = 66.4;
+    else if (FT1 <= 153.06)
+      tmp1 = 66.5;
+    else if (FT1 <= 153.258)
+      tmp1 = 66.6;
+    else if (FT1 <= 153.456)
+      tmp1 = 66.7;
+    else if (FT1 <= 153.654)
+      tmp1 = 66.8;
+    else if (FT1 <= 153.852)
+      tmp1 = 66.9;
+    else if (FT1 <= 154.05)
+      tmp1 = 67;
+  } else if (FT1 <= 155.841) {
+    if (FT1 == 154.05)
+      tmp1 = 67;
+    else if (FT1 <= 154.248)
+      tmp1 = 67.1;
+    else if (FT1 <= 154.447)
+      tmp1 = 67.2;
+    else if (FT1 <= 154.646)
+      tmp1 = 67.3;
+    else if (FT1 <= 154.845)
+      tmp1 = 67.4;
+    else if (FT1 <= 155.043)
+      tmp1 = 67.5;
+    else if (FT1 <= 155.243)
+      tmp1 = 67.6;
+    else if (FT1 <= 155.442)
+      tmp1 = 67.7;
+    else if (FT1 <= 155.641)
+      tmp1 = 67.8;
+    else if (FT1 <= 155.841)
+      tmp1 = 67.9;
+    else if (FT1 <= 156.04)
+      tmp1 = 68;
+  } else if (FT1 <= 157.844) {
+    if (FT1 == 156.04)
+      tmp1 = 68;
+    else if (FT1 <= 156.24)
+      tmp1 = 68.1;
+    else if (FT1 <= 156.44)
+      tmp1 = 68.2;
+    else if (FT1 <= 156.64)
+      tmp1 = 68.3;
+    else if (FT1 <= 156.841)
+      tmp1 = 68.4;
+    else if (FT1 <= 157.041)
+      tmp1 = 68.5;
+    else if (FT1 <= 157.242)
+      tmp1 = 68.6;
+    else if (FT1 <= 157.442)
+      tmp1 = 68.7;
+    else if (FT1 <= 157.643)
+      tmp1 = 68.8;
+    else if (FT1 <= 157.844)
+      tmp1 = 68.9;
+    else if (FT1 <= 158.045)
+      tmp1 = 69;
+  } else if (FT1 <= 159.862) {
+    if (FT1 == 158.045)
+      tmp1 = 69;
+    else if (FT1 <= 158.247)
+      tmp1 = 69.1;
+    else if (FT1 <= 158.448)
+      tmp1 = 69.2;
+    else if (FT1 <= 158.65)
+      tmp1 = 69.3;
+    else if (FT1 <= 158.851)
+      tmp1 = 69.4;
+    else if (FT1 <= 159.053)
+      tmp1 = 69.5;
+    else if (FT1 <= 159.255)
+      tmp1 = 69.6;
+    else if (FT1 <= 159.457)
+      tmp1 = 69.7;
+    else if (FT1 <= 159.66)
+      tmp1 = 69.8;
+    else if (FT1 <= 159.862)
+      tmp1 = 69.9;
+    else if (FT1 <= 160.065)
+      tmp1 = 70;
+  } else if (FT1 <= 161.894) {
+    if (FT1 == 160.065)
+      tmp1 = 70;
+    else if (FT1 <= 160.267)
+      tmp1 = 70.1;
+    else if (FT1 <= 160.47)
+      tmp1 = 70.2;
+    else if (FT1 <= 160.673)
+      tmp1 = 70.3;
+    else if (FT1 <= 160.876)
+      tmp1 = 70.4;
+    else if (FT1 <= 161.08)
+      tmp1 = 70.5;
+    else if (FT1 <= 161.283)
+      tmp1 = 70.6;
+    else if (FT1 <= 161.487)
+      tmp1 = 70.7;
+    else if (FT1 <= 161.69)
+      tmp1 = 70.8;
+    else if (FT1 <= 161.894)
+      tmp1 = 70.9;
+    else if (FT1 <= 162.098)
+      tmp1 = 71;
+  } else if (FT1 <= 163.941) {
+    if (FT1 == 162.098)
+      tmp1 = 71;
+    else if (FT1 <= 162.303)
+      tmp1 = 71.1;
+    else if (FT1 <= 162.507)
+      tmp1 = 71.2;
+    else if (FT1 <= 162.711)
+      tmp1 = 71.3;
+    else if (FT1 <= 162.916)
+      tmp1 = 71.4;
+    else if (FT1 <= 163.121)
+      tmp1 = 71.5;
+    else if (FT1 <= 163.326)
+      tmp1 = 71.6;
+    else if (FT1 <= 163.531)
+      tmp1 = 71.7;
+    else if (FT1 <= 163.736)
+      tmp1 = 71.8;
+    else if (FT1 <= 163.941)
+      tmp1 = 71.9;
+    else if (FT1 <= 164.147)
+      tmp1 = 72;
+  } else if (FT1 <= 166.002) {
+    if (FT1 == 164.147)
+      tmp1 = 72;
+    else if (FT1 <= 164.352)
+      tmp1 = 72.1;
+    else if (FT1 <= 164.558)
+      tmp1 = 72.2;
+    else if (FT1 <= 164.764)
+      tmp1 = 72.3;
+    else if (FT1 <= 164.97)
+      tmp1 = 72.4;
+    else if (FT1 <= 165.176)
+      tmp1 = 72.5;
+    else if (FT1 <= 165.383)
+      tmp1 = 72.6;
+    else if (FT1 <= 165.589)
+      tmp1 = 72.7;
+    else if (FT1 <= 165.796)
+      tmp1 = 72.8;
+    else if (FT1 <= 166.002)
+      tmp1 = 72.9;
+    else if (FT1 <= 166.209)
+      tmp1 = 73;
+  } else if (FT1 <= 168.078) {
+    if (FT1 == 166.209)
+      tmp1 = 73;
+    else if (FT1 <= 166.416)
+      tmp1 = 73.1;
+    else if (FT1 <= 166.624)
+      tmp1 = 73.2;
+    else if (FT1 <= 166.831)
+      tmp1 = 73.3;
+    else if (FT1 <= 167.039)
+      tmp1 = 73.4;
+    else if (FT1 <= 167.246)
+      tmp1 = 73.5;
+    else if (FT1 <= 167.454)
+      tmp1 = 73.6;
+    else if (FT1 <= 167.662)
+      tmp1 = 73.7;
+    else if (FT1 <= 167.87)
+      tmp1 = 73.8;
+    else if (FT1 <= 168.078)
+      tmp1 = 73.9;
+    else if (FT1 <= 168.287)
+      tmp1 = 74;
+  } else if (FT1 <= 170.168) {
+    if (FT1 == 168.287)
+      tmp1 = 74;
+    else if (FT1 <= 168.495)
+      tmp1 = 74.1;
+    else if (FT1 <= 168.704)
+      tmp1 = 74.2;
+    else if (FT1 <= 168.913)
+      tmp1 = 74.3;
+    else if (FT1 <= 169.122)
+      tmp1 = 74.4;
+    else if (FT1 <= 169.331)
+      tmp1 = 74.5;
+    else if (FT1 <= 169.54)
+      tmp1 = 74.6;
+    else if (FT1 <= 169.749)
+      tmp1 = 74.7;
+    else if (FT1 <= 169.959)
+      tmp1 = 74.8;
+    else if (FT1 <= 170.168)
+      tmp1 = 74.9;
+    else if (FT1 <= 170.378)
+      tmp1 = 75;
+  } else if (FT1 <= 172.273) {
+    if (FT1 == 170.378)
+      tmp1 = 75;
+    else if (FT1 <= 170.588)
+      tmp1 = 75.1;
+    else if (FT1 <= 170.798)
+      tmp1 = 75.2;
+    else if (FT1 <= 171.009)
+      tmp1 = 75.3;
+    else if (FT1 <= 171.219)
+      tmp1 = 75.4;
+    else if (FT1 <= 171.43)
+      tmp1 = 75.5;
+    else if (FT1 <= 171.64)
+      tmp1 = 75.6;
+    else if (FT1 <= 171.851)
+      tmp1 = 75.7;
+    else if (FT1 <= 172.062)
+      tmp1 = 75.8;
+    else if (FT1 <= 172.273)
+      tmp1 = 75.9;
+    else if (FT1 <= 172.484)
+      tmp1 = 76;
+  } else if (FT1 <= 174.392) {
+    if (FT1 == 172.484)
+      tmp1 = 76;
+    else if (FT1 <= 172.696)
+      tmp1 = 76.1;
+    else if (FT1 <= 172.907)
+      tmp1 = 76.2;
+    else if (FT1 <= 173.119)
+      tmp1 = 76.3;
+    else if (FT1 <= 173.331)
+      tmp1 = 76.4;
+    else if (FT1 <= 173.543)
+      tmp1 = 76.5;
+    else if (FT1 <= 173.755)
+      tmp1 = 76.6;
+    else if (FT1 <= 173.967)
+      tmp1 = 76.7;
+    else if (FT1 <= 174.18)
+      tmp1 = 76.8;
+    else if (FT1 <= 174.392)
+      tmp1 = 76.9;
+    else if (FT1 <= 174.605)
+      tmp1 = 77;
+  } else if (FT1 <= 176.526) {
+    if (FT1 == 174.605)
+      tmp1 = 77;
+    else if (FT1 <= 174.818)
+      tmp1 = 77.1;
+    else if (FT1 <= 175.031)
+      tmp1 = 77.2;
+    else if (FT1 <= 175.244)
+      tmp1 = 77.3;
+    else if (FT1 <= 175.457)
+      tmp1 = 77.4;
+    else if (FT1 <= 175.671)
+      tmp1 = 77.5;
+    else if (FT1 <= 175.884)
+      tmp1 = 77.6;
+    else if (FT1 <= 176.098)
+      tmp1 = 77.7;
+    else if (FT1 <= 176.312)
+      tmp1 = 77.8;
+    else if (FT1 <= 176.526)
+      tmp1 = 77.9;
+    else if (FT1 <= 176.74)
+      tmp1 = 78;
+  } else if (FT1 <= 178.674) {
+    if (FT1 == 176.74)
+      tmp1 = 78;
+    else if (FT1 <= 176.954)
+      tmp1 = 78.1;
+    else if (FT1 <= 177.169)
+      tmp1 = 78.2;
+    else if (FT1 <= 177.383)
+      tmp1 = 78.3;
+    else if (FT1 <= 177.598)
+      tmp1 = 78.4;
+    else if (FT1 <= 177.813)
+      tmp1 = 78.5;
+    else if (FT1 <= 178.028)
+      tmp1 = 78.6;
+    else if (FT1 <= 178.243)
+      tmp1 = 78.7;
+    else if (FT1 <= 178.459)
+      tmp1 = 78.8;
+    else if (FT1 <= 178.674)
+      tmp1 = 78.9;
+    else if (FT1 <= 178.89)
+      tmp1 = 79;
+  } else if (FT1 <= 180.836) {
+    if (FT1 == 178.89)
+      tmp1 = 79;
+    else if (FT1 <= 179.105)
+      tmp1 = 79.1;
+    else if (FT1 <= 179.321)
+      tmp1 = 79.2;
+    else if (FT1 <= 179.537)
+      tmp1 = 79.3;
+    else if (FT1 <= 179.753)
+      tmp1 = 79.4;
+    else if (FT1 <= 179.97)
+      tmp1 = 79.5;
+    else if (FT1 <= 180.186)
+      tmp1 = 79.6;
+    else if (FT1 <= 180.403)
+      tmp1 = 79.7;
+    else if (FT1 <= 180.62)
+      tmp1 = 79.8;
+    else if (FT1 <= 180.836)
+      tmp1 = 79.9;
+    else if (FT1 <= 181.054)
+      tmp1 = 80;
+  } else if (FT1 <= 183.013) {
+    if (FT1 == 181.054)
+      tmp1 = 80;
+    else if (FT1 <= 181.271)
+      tmp1 = 80.1;
+    else if (FT1 <= 181.488)
+      tmp1 = 80.2;
+    else if (FT1 <= 181.706)
+      tmp1 = 80.3;
+    else if (FT1 <= 181.923)
+      tmp1 = 80.4;
+    else if (FT1 <= 182.141)
+      tmp1 = 80.5;
+    else if (FT1 <= 182.359)
+      tmp1 = 80.6;
+    else if (FT1 <= 182.577)
+      tmp1 = 80.7;
+    else if (FT1 <= 182.795)
+      tmp1 = 80.8;
+    else if (FT1 <= 183.013)
+      tmp1 = 80.9;
+    else if (FT1 <= 183.232)
+      tmp1 = 81;
+  } else if (FT1 <= 185.205) {
+    if (FT1 == 183.232)
+      tmp1 = 81;
+    else if (FT1 <= 183.45)
+      tmp1 = 81.1;
+    else if (FT1 <= 183.669)
+      tmp1 = 81.2;
+    else if (FT1 <= 183.888)
+      tmp1 = 81.3;
+    else if (FT1 <= 184.107)
+      tmp1 = 81.4;
+    else if (FT1 <= 184.326)
+      tmp1 = 81.5;
+    else if (FT1 <= 184.546)
+      tmp1 = 81.6;
+    else if (FT1 <= 184.765)
+      tmp1 = 81.7;
+    else if (FT1 <= 184.985)
+      tmp1 = 81.8;
+    else if (FT1 <= 185.205)
+      tmp1 = 81.9;
+    else if (FT1 <= 185.425)
+      tmp1 = 82;
+  } else if (FT1 <= 187.41) {
+    if (FT1 == 185.425)
+      tmp1 = 82;
+    else if (FT1 <= 185.645)
+      tmp1 = 82.1;
+    else if (FT1 <= 185.865)
+      tmp1 = 82.2;
+    else if (FT1 <= 186.085)
+      tmp1 = 82.3;
+    else if (FT1 <= 186.306)
+      tmp1 = 82.4;
+    else if (FT1 <= 186.526)
+      tmp1 = 82.5;
+    else if (FT1 <= 186.747)
+      tmp1 = 82.6;
+    else if (FT1 <= 186.968)
+      tmp1 = 82.7;
+    else if (FT1 <= 187.189)
+      tmp1 = 82.8;
+    else if (FT1 <= 187.41)
+      tmp1 = 82.9;
+    else if (FT1 <= 187.632)
+      tmp1 = 83;
+  } else if (FT1 <= 189.631) {
+    if (FT1 == 187.632)
+      tmp1 = 83;
+    else if (FT1 <= 187.853)
+      tmp1 = 83.1;
+    else if (FT1 <= 188.075)
+      tmp1 = 83.2;
+    else if (FT1 <= 188.297)
+      tmp1 = 83.3;
+    else if (FT1 <= 188.519)
+      tmp1 = 83.4;
+    else if (FT1 <= 188.741)
+      tmp1 = 83.5;
+    else if (FT1 <= 188.963)
+      tmp1 = 83.6;
+    else if (FT1 <= 189.185)
+      tmp1 = 83.7;
+    else if (FT1 <= 189.408)
+      tmp1 = 83.8;
+    else if (FT1 <= 189.631)
+      tmp1 = 83.9;
+    else if (FT1 <= 189.853)
+      tmp1 = 84;
+  } else if (FT1 <= 191.865) {
+    if (FT1 == 189.853)
+      tmp1 = 84;
+    else if (FT1 <= 190.076)
+      tmp1 = 84.1;
+    else if (FT1 <= 190.299)
+      tmp1 = 84.2;
+    else if (FT1 <= 190.523)
+      tmp1 = 84.3;
+    else if (FT1 <= 190.746)
+      tmp1 = 84.4;
+    else if (FT1 <= 190.97)
+      tmp1 = 84.5;
+    else if (FT1 <= 191.193)
+      tmp1 = 84.6;
+    else if (FT1 <= 191.417)
+      tmp1 = 84.7;
+    else if (FT1 <= 191.641)
+      tmp1 = 84.8;
+    else if (FT1 <= 191.865)
+      tmp1 = 84.9;
+    else if (FT1 <= 192.089)
+      tmp1 = 85;
+  } else if (FT1 <= 194.114) {
+    if (FT1 == 192.089)
+      tmp1 = 85;
+    else if (FT1 <= 192.314)
+      tmp1 = 85.1;
+    else if (FT1 <= 192.538)
+      tmp1 = 85.2;
+    else if (FT1 <= 192.763)
+      tmp1 = 85.3;
+    else if (FT1 <= 192.988)
+      tmp1 = 85.4;
+    else if (FT1 <= 193.213)
+      tmp1 = 85.5;
+    else if (FT1 <= 193.438)
+      tmp1 = 85.6;
+    else if (FT1 <= 193.663)
+      tmp1 = 85.7;
+    else if (FT1 <= 193.889)
+      tmp1 = 85.8;
+    else if (FT1 <= 194.114)
+      tmp1 = 85.9;
+    else if (FT1 <= 194.34)
+      tmp1 = 86;
+  } else if (FT1 <= 196.377) {
+    if (FT1 == 194.34)
+      tmp1 = 86;
+    else if (FT1 <= 194.566)
+      tmp1 = 86.1;
+    else if (FT1 <= 194.792)
+      tmp1 = 86.2;
+    else if (FT1 <= 195.018)
+      tmp1 = 86.3;
+    else if (FT1 <= 195.244)
+      tmp1 = 86.4;
+    else if (FT1 <= 195.47)
+      tmp1 = 86.5;
+    else if (FT1 <= 195.697)
+      tmp1 = 86.6;
+    else if (FT1 <= 195.924)
+      tmp1 = 86.7;
+    else if (FT1 <= 196.15)
+      tmp1 = 86.8;
+    else if (FT1 <= 196.377)
+      tmp1 = 86.9;
+    else if (FT1 <= 196.604)
+      tmp1 = 87;
+  } else if (FT1 <= 198.655) {
+    if (FT1 == 196.604)
+      tmp1 = 87;
+    else if (FT1 <= 196.832)
+      tmp1 = 87.1;
+    else if (FT1 <= 197.059)
+      tmp1 = 87.2;
+    else if (FT1 <= 197.287)
+      tmp1 = 87.3;
+    else if (FT1 <= 197.514)
+      tmp1 = 87.4;
+    else if (FT1 <= 197.742)
+      tmp1 = 87.5;
+    else if (FT1 <= 197.97)
+      tmp1 = 87.6;
+    else if (FT1 <= 198.198)
+      tmp1 = 87.7;
+    else if (FT1 <= 198.427)
+      tmp1 = 87.8;
+    else if (FT1 <= 198.655)
+      tmp1 = 87.9;
+    else if (FT1 <= 198.884)
+      tmp1 = 88;
+  } else if (FT1 <= 200.947) {
+    if (FT1 == 198.884)
+      tmp1 = 88;
+    else if (FT1 <= 199.112)
+      tmp1 = 88.1;
+    else if (FT1 <= 199.341)
+      tmp1 = 88.2;
+    else if (FT1 <= 199.57)
+      tmp1 = 88.3;
+    else if (FT1 <= 199.799)
+      tmp1 = 88.4;
+    else if (FT1 <= 200.029)
+      tmp1 = 88.5;
+    else if (FT1 <= 200.258)
+      tmp1 = 88.6;
+    else if (FT1 <= 200.487)
+      tmp1 = 88.7;
+    else if (FT1 <= 200.717)
+      tmp1 = 88.8;
+    else if (FT1 <= 200.947)
+      tmp1 = 88.9;
+    else if (FT1 <= 201.177)
+      tmp1 = 89;
+  } else if (FT1 <= 203.253) {
+    if (FT1 == 201.177)
+      tmp1 = 89;
+    else if (FT1 <= 201.407)
+      tmp1 = 89.1;
+    else if (FT1 <= 201.637)
+      tmp1 = 89.2;
+    else if (FT1 <= 201.868)
+      tmp1 = 89.3;
+    else if (FT1 <= 202.098)
+      tmp1 = 89.4;
+    else if (FT1 <= 202.329)
+      tmp1 = 89.5;
+    else if (FT1 <= 202.56)
+      tmp1 = 89.6;
+    else if (FT1 <= 202.791)
+      tmp1 = 89.7;
+    else if (FT1 <= 203.022)
+      tmp1 = 89.8;
+    else if (FT1 <= 203.253)
+      tmp1 = 89.9;
+    else if (FT1 <= 203.485)
+      tmp1 = 90;
+  } else if (FT1 <= 205.574) {
+    if (FT1 == 203.485)
+      tmp1 = 90;
+    else if (FT1 <= 203.716)
+      tmp1 = 90.1;
+    else if (FT1 <= 203.948)
+      tmp1 = 90.2;
+    else if (FT1 <= 204.18)
+      tmp1 = 90.3;
+    else if (FT1 <= 204.412)
+      tmp1 = 90.4;
+    else if (FT1 <= 204.644)
+      tmp1 = 90.5;
+    else if (FT1 <= 204.876)
+      tmp1 = 90.6;
+    else if (FT1 <= 205.109)
+      tmp1 = 90.7;
+    else if (FT1 <= 205.341)
+      tmp1 = 90.8;
+    else if (FT1 <= 205.574)
+      tmp1 = 90.9;
+    else if (FT1 <= 205.807)
+      tmp1 = 91;
+  } else if (FT1 <= 207.909) {
+    if (FT1 == 205.807)
+      tmp1 = 91;
+    else if (FT1 <= 206.04)
+      tmp1 = 91.1;
+    else if (FT1 <= 206.273)
+      tmp1 = 91.2;
+    else if (FT1 <= 206.506)
+      tmp1 = 91.3;
+    else if (FT1 <= 206.74)
+      tmp1 = 91.4;
+    else if (FT1 <= 206.973)
+      tmp1 = 91.5;
+    else if (FT1 <= 207.207)
+      tmp1 = 91.6;
+    else if (FT1 <= 207.441)
+      tmp1 = 91.7;
+    else if (FT1 <= 207.675)
+      tmp1 = 91.8;
+    else if (FT1 <= 207.909)
+      tmp1 = 91.9;
+    else if (FT1 <= 208.143)
+      tmp1 = 92;
+  } else if (FT1 <= 210.258) {
+    if (FT1 == 208.143)
+      tmp1 = 92;
+    else if (FT1 <= 208.378)
+      tmp1 = 92.1;
+    else if (FT1 <= 208.612)
+      tmp1 = 92.2;
+    else if (FT1 <= 208.847)
+      tmp1 = 92.3;
+    else if (FT1 <= 209.082)
+      tmp1 = 92.4;
+    else if (FT1 <= 209.317)
+      tmp1 = 92.5;
+    else if (FT1 <= 209.552)
+      tmp1 = 92.6;
+    else if (FT1 <= 209.787)
+      tmp1 = 92.7;
+    else if (FT1 <= 210.023)
+      tmp1 = 92.8;
+    else if (FT1 <= 210.258)
+      tmp1 = 92.9;
+    else if (FT1 <= 210.494)
+      tmp1 = 93;
+  } else if (FT1 <= 212.622) {
+    if (FT1 == 210.494)
+      tmp1 = 93;
+    else if (FT1 <= 210.73)
+      tmp1 = 93.1;
+    else if (FT1 <= 210.966)
+      tmp1 = 93.2;
+    else if (FT1 <= 211.202)
+      tmp1 = 93.3;
+    else if (FT1 <= 211.438)
+      tmp1 = 93.4;
+    else if (FT1 <= 211.675)
+      tmp1 = 93.5;
+    else if (FT1 <= 211.911)
+      tmp1 = 93.6;
+    else if (FT1 <= 212.148)
+      tmp1 = 93.7;
+    else if (FT1 <= 212.385)
+      tmp1 = 93.8;
+    else if (FT1 <= 212.622)
+      tmp1 = 93.9;
+    else if (FT1 <= 212.859)
+      tmp1 = 94;
+  } else if (FT1 <= 215) {
+    if (FT1 == 212.859)
+      tmp1 = 94;
+    else if (FT1 <= 213.096)
+      tmp1 = 94.1;
+    else if (FT1 <= 213.334)
+      tmp1 = 94.2;
+    else if (FT1 <= 213.571)
+      tmp1 = 94.3;
+    else if (FT1 <= 213.809)
+      tmp1 = 94.4;
+    else if (FT1 <= 214.047)
+      tmp1 = 94.5;
+    else if (FT1 <= 214.285)
+      tmp1 = 94.6;
+    else if (FT1 <= 214.523)
+      tmp1 = 94.7;
+    else if (FT1 <= 214.761)
+      tmp1 = 94.8;
+    else if (FT1 <= 215)
+      tmp1 = 94.9;
+    else if (FT1 <= 215.238)
+      tmp1 = 95;
+  } else if (FT1 <= 217.392) {
+    if (FT1 == 215.238)
+      tmp1 = 95;
+    else if (FT1 <= 215.477)
+      tmp1 = 95.1;
+    else if (FT1 <= 215.716)
+      tmp1 = 95.2;
+    else if (FT1 <= 215.955)
+      tmp1 = 95.3;
+    else if (FT1 <= 216.194)
+      tmp1 = 95.4;
+    else if (FT1 <= 216.433)
+      tmp1 = 95.5;
+    else if (FT1 <= 216.673)
+      tmp1 = 95.6;
+    else if (FT1 <= 216.912)
+      tmp1 = 95.7;
+    else if (FT1 <= 217.152)
+      tmp1 = 95.8;
+    else if (FT1 <= 217.392)
+      tmp1 = 95.9;
+    else if (FT1 <= 217.632)
+      tmp1 = 96;
+  } else if (FT1 <= 219.798) {
+    if (FT1 == 217.632)
+      tmp1 = 96;
+    else if (FT1 <= 217.872)
+      tmp1 = 96.1;
+    else if (FT1 <= 218.112)
+      tmp1 = 96.2;
+    else if (FT1 <= 218.353)
+      tmp1 = 96.3;
+    else if (FT1 <= 218.593)
+      tmp1 = 96.4;
+    else if (FT1 <= 218.834)
+      tmp1 = 96.5;
+    else if (FT1 <= 219.075)
+      tmp1 = 96.6;
+    else if (FT1 <= 219.316)
+      tmp1 = 96.7;
+    else if (FT1 <= 219.557)
+      tmp1 = 96.8;
+    else if (FT1 <= 219.798)
+      tmp1 = 96.9;
+    else if (FT1 <= 220.04)
+      tmp1 = 97;
+  } else if (FT1 <= 222.219) {
+    if (FT1 == 220.04)
+      tmp1 = 97;
+    else if (FT1 <= 220.281)
+      tmp1 = 97.1;
+    else if (FT1 <= 220.523)
+      tmp1 = 97.2;
+    else if (FT1 <= 220.765)
+      tmp1 = 97.3;
+    else if (FT1 <= 221.007)
+      tmp1 = 97.4;
+    else if (FT1 <= 221.249)
+      tmp1 = 97.5;
+    else if (FT1 <= 221.491)
+      tmp1 = 97.6;
+    else if (FT1 <= 221.734)
+      tmp1 = 97.7;
+    else if (FT1 <= 221.976)
+      tmp1 = 97.8;
+    else if (FT1 <= 222.219)
+      tmp1 = 97.9;
+    else if (FT1 <= 222.462)
+      tmp1 = 98;
+  } else if (FT1 <= 224.654) {
+    if (FT1 == 222.462)
+      tmp1 = 98;
+    else if (FT1 <= 222.705)
+      tmp1 = 98.1;
+    else if (FT1 <= 222.948)
+      tmp1 = 98.2;
+    else if (FT1 <= 223.191)
+      tmp1 = 98.3;
+    else if (FT1 <= 223.434)
+      tmp1 = 98.4;
+    else if (FT1 <= 223.678)
+      tmp1 = 98.5;
+    else if (FT1 <= 223.922)
+      tmp1 = 98.6;
+    else if (FT1 <= 224.166)
+      tmp1 = 98.7;
+    else if (FT1 <= 224.409)
+      tmp1 = 98.8;
+    else if (FT1 <= 224.654)
+      tmp1 = 98.9;
+    else if (FT1 <= 224.898)
+      tmp1 = 99;
+  } else if (FT1 <= 227.103) {
+    if (FT1 == 224.898)
+      tmp1 = 99;
+    else if (FT1 <= 225.142)
+      tmp1 = 99.1;
+    else if (FT1 <= 225.387)
+      tmp1 = 99.2;
+    else if (FT1 <= 225.631)
+      tmp1 = 99.3;
+    else if (FT1 <= 225.876)
+      tmp1 = 99.4;
+    else if (FT1 <= 226.121)
+      tmp1 = 99.5;
+    else if (FT1 <= 226.366)
+      tmp1 = 99.6;
+    else if (FT1 <= 226.612)
+      tmp1 = 99.7;
+    else if (FT1 <= 226.857)
+      tmp1 = 99.8;
+    else if (FT1 <= 227.103)
+      tmp1 = 99.9;
+    else if (FT1 <= 227.348)
+      tmp1 = 100;
+  } else if (FT1 <= 229.566) {
+    if (FT1 == 227.348)
+      tmp1 = 100;
+    else if (FT1 <= 227.594)
+      tmp1 = 100.1;
+    else if (FT1 <= 227.84)
+      tmp1 = 100.2;
+    else if (FT1 <= 228.086)
+      tmp1 = 100.3;
+    else if (FT1 <= 228.332)
+      tmp1 = 100.4;
+    else if (FT1 <= 228.579)
+      tmp1 = 100.5;
+    else if (FT1 <= 228.825)
+      tmp1 = 100.6;
+    else if (FT1 <= 229.072)
+      tmp1 = 100.7;
+    else if (FT1 <= 229.319)
+      tmp1 = 100.8;
+    else if (FT1 <= 229.566)
+      tmp1 = 100.9;
+    else if (FT1 <= 229.813)
+      tmp1 = 101;
+  } else if (FT1 <= 232.043) {
+    if (FT1 == 229.813)
+      tmp1 = 101;
+    else if (FT1 <= 230.06)
+      tmp1 = 101.1;
+    else if (FT1 <= 230.308)
+      tmp1 = 101.2;
+    else if (FT1 <= 230.555)
+      tmp1 = 101.3;
+    else if (FT1 <= 230.803)
+      tmp1 = 101.4;
+    else if (FT1 <= 231.051)
+      tmp1 = 101.5;
+    else if (FT1 <= 231.298)
+      tmp1 = 101.6;
+    else if (FT1 <= 231.547)
+      tmp1 = 101.7;
+    else if (FT1 <= 231.795)
+      tmp1 = 101.8;
+    else if (FT1 <= 232.043)
+      tmp1 = 101.9;
+    else if (FT1 <= 232.292)
+      tmp1 = 102;
+  } else if (FT1 <= 234.535) {
+    if (FT1 == 232.292)
+      tmp1 = 102;
+    else if (FT1 <= 232.54)
+      tmp1 = 102.1;
+    else if (FT1 <= 232.789)
+      tmp1 = 102.2;
+    else if (FT1 <= 233.038)
+      tmp1 = 102.3;
+    else if (FT1 <= 233.287)
+      tmp1 = 102.4;
+    else if (FT1 <= 233.536)
+      tmp1 = 102.5;
+    else if (FT1 <= 233.786)
+      tmp1 = 102.6;
+    else if (FT1 <= 234.035)
+      tmp1 = 102.7;
+    else if (FT1 <= 234.285)
+      tmp1 = 102.8;
+    else if (FT1 <= 234.535)
+      tmp1 = 102.9;
+    else if (FT1 <= 234.785)
+      tmp1 = 103;
+  } else if (FT1 <= 237.04) {
+    if (FT1 == 234.785)
+      tmp1 = 103;
+    else if (FT1 <= 235.035)
+      tmp1 = 103.1;
+    else if (FT1 <= 235.285)
+      tmp1 = 103.2;
+    else if (FT1 <= 235.535)
+      tmp1 = 103.3;
+    else if (FT1 <= 235.786)
+      tmp1 = 103.4;
+    else if (FT1 <= 236.036)
+      tmp1 = 103.5;
+    else if (FT1 <= 236.287)
+      tmp1 = 103.6;
+    else if (FT1 <= 236.538)
+      tmp1 = 103.7;
+    else if (FT1 <= 236.789)
+      tmp1 = 103.8;
+    else if (FT1 <= 237.04)
+      tmp1 = 103.9;
+    else if (FT1 <= 237.292)
+      tmp1 = 104;
+  } else if (FT1 <= 239.56) {
+    if (FT1 == 237.292)
+      tmp1 = 104;
+    else if (FT1 <= 237.543)
+      tmp1 = 104.1;
+    else if (FT1 <= 237.795)
+      tmp1 = 104.2;
+    else if (FT1 <= 238.047)
+      tmp1 = 104.3;
+    else if (FT1 <= 238.298)
+      tmp1 = 104.4;
+    else if (FT1 <= 238.55)
+      tmp1 = 104.5;
+    else if (FT1 <= 238.803)
+      tmp1 = 104.6;
+    else if (FT1 <= 239.055)
+      tmp1 = 104.7;
+    else if (FT1 <= 239.307)
+      tmp1 = 104.8;
+    else if (FT1 <= 239.56)
+      tmp1 = 104.9;
+    else if (FT1 <= 239.813)
+      tmp1 = 105;
+  } else if (FT1 <= 242.094) {
+    if (FT1 == 239.813)
+      tmp1 = 105;
+    else if (FT1 <= 240.066)
+      tmp1 = 105.1;
+    else if (FT1 <= 240.319)
+      tmp1 = 105.2;
+    else if (FT1 <= 240.572)
+      tmp1 = 105.3;
+    else if (FT1 <= 240.825)
+      tmp1 = 105.4;
+    else if (FT1 <= 241.079)
+      tmp1 = 105.5;
+    else if (FT1 <= 241.332)
+      tmp1 = 105.6;
+    else if (FT1 <= 241.586)
+      tmp1 = 105.7;
+    else if (FT1 <= 241.84)
+      tmp1 = 105.8;
+    else if (FT1 <= 242.094)
+      tmp1 = 105.9;
+    else if (FT1 <= 242.348)
+      tmp1 = 106;
+  } else if (FT1 <= 244.642) {
+    if (FT1 == 242.348)
+      tmp1 = 106;
+    else if (FT1 <= 242.602)
+      tmp1 = 106.1;
+    else if (FT1 <= 242.857)
+      tmp1 = 106.2;
+    else if (FT1 <= 243.111)
+      tmp1 = 106.3;
+    else if (FT1 <= 243.366)
+      tmp1 = 106.4;
+    else if (FT1 <= 243.621)
+      tmp1 = 106.5;
+    else if (FT1 <= 243.876)
+      tmp1 = 106.6;
+    else if (FT1 <= 244.131)
+      tmp1 = 106.7;
+    else if (FT1 <= 244.386)
+      tmp1 = 106.8;
+    else if (FT1 <= 244.642)
+      tmp1 = 106.9;
+    else if (FT1 <= 244.897)
+      tmp1 = 107;
+  } else if (FT1 <= 247.204) {
+    if (FT1 == 244.897)
+      tmp1 = 107;
+    else if (FT1 <= 245.153)
+      tmp1 = 107.1;
+    else if (FT1 <= 245.409)
+      tmp1 = 107.2;
+    else if (FT1 <= 245.665)
+      tmp1 = 107.3;
+    else if (FT1 <= 245.921)
+      tmp1 = 107.4;
+    else if (FT1 <= 246.177)
+      tmp1 = 107.5;
+    else if (FT1 <= 246.434)
+      tmp1 = 107.6;
+    else if (FT1 <= 246.69)
+      tmp1 = 107.7;
+    else if (FT1 <= 246.947)
+      tmp1 = 107.8;
+    else if (FT1 <= 247.204)
+      tmp1 = 107.9;
+    else if (FT1 <= 247.461)
+      tmp1 = 108;
+  } else if (FT1 <= 249.78) {
+    if (FT1 == 247.461)
+      tmp1 = 108;
+    else if (FT1 <= 247.718)
+      tmp1 = 108.1;
+    else if (FT1 <= 247.975)
+      tmp1 = 108.2;
+    else if (FT1 <= 248.233)
+      tmp1 = 108.3;
+    else if (FT1 <= 248.49)
+      tmp1 = 108.4;
+    else if (FT1 <= 248.748)
+      tmp1 = 108.5;
+    else if (FT1 <= 249.006)
+      tmp1 = 108.6;
+    else if (FT1 <= 249.264)
+      tmp1 = 108.7;
+    else if (FT1 <= 249.522)
+      tmp1 = 108.8;
+    else if (FT1 <= 249.78)
+      tmp1 = 108.9;
+    else if (FT1 <= 250.038)
+      tmp1 = 109;
+  } else if (FT1 <= 252.37) {
+    if (FT1 == 250.038)
+      tmp1 = 109;
+    else if (FT1 <= 250.297)
+      tmp1 = 109.1;
+    else if (FT1 <= 250.556)
+      tmp1 = 109.2;
+    else if (FT1 <= 250.814)
+      tmp1 = 109.3;
+    else if (FT1 <= 251.073)
+      tmp1 = 109.4;
+    else if (FT1 <= 251.332)
+      tmp1 = 109.5;
+    else if (FT1 <= 251.592)
+      tmp1 = 109.6;
+    else if (FT1 <= 251.851)
+      tmp1 = 109.7;
+    else if (FT1 <= 252.11)
+      tmp1 = 109.8;
+    else if (FT1 <= 252.37)
+      tmp1 = 109.9;
+    else if (FT1 <= 252.63)
+      tmp1 = 110;
+  } else if (FT1 <= 254.974) {
+    if (FT1 == 252.63)
+      tmp1 = 110;
+    else if (FT1 <= 252.89)
+      tmp1 = 110.1;
+    else if (FT1 <= 253.15)
+      tmp1 = 110.2;
+    else if (FT1 <= 253.41)
+      tmp1 = 110.3;
+    else if (FT1 <= 253.67)
+      tmp1 = 110.4;
+    else if (FT1 <= 253.931)
+      tmp1 = 110.5;
+    else if (FT1 <= 254.191)
+      tmp1 = 110.6;
+    else if (FT1 <= 254.452)
+      tmp1 = 110.7;
+    else if (FT1 <= 254.713)
+      tmp1 = 110.8;
+    else if (FT1 <= 254.974)
+      tmp1 = 110.9;
+    else if (FT1 <= 255.235)
+      tmp1 = 111;
+  } else if (FT1 <= 257.592) {
+    if (FT1 == 255.235)
+      tmp1 = 111;
+    else if (FT1 <= 255.497)
+      tmp1 = 111.1;
+    else if (FT1 <= 255.758)
+      tmp1 = 111.2;
+    else if (FT1 <= 256.02)
+      tmp1 = 111.3;
+    else if (FT1 <= 256.281)
+      tmp1 = 111.4;
+    else if (FT1 <= 256.543)
+      tmp1 = 111.5;
+    else if (FT1 <= 256.805)
+      tmp1 = 111.6;
+    else if (FT1 <= 257.068)
+      tmp1 = 111.7;
+    else if (FT1 <= 257.33)
+      tmp1 = 111.8;
+    else if (FT1 <= 257.592)
+      tmp1 = 111.9;
+    else if (FT1 <= 257.855)
+      tmp1 = 112;
+  } else if (FT1 <= 260.224) {
+    if (FT1 == 257.855)
+      tmp1 = 112;
+    else if (FT1 <= 258.118)
+      tmp1 = 112.1;
+    else if (FT1 <= 258.38)
+      tmp1 = 112.2;
+    else if (FT1 <= 258.643)
+      tmp1 = 112.3;
+    else if (FT1 <= 258.907)
+      tmp1 = 112.4;
+    else if (FT1 <= 259.17)
+      tmp1 = 112.5;
+    else if (FT1 <= 259.433)
+      tmp1 = 112.6;
+    else if (FT1 <= 259.697)
+      tmp1 = 112.7;
+    else if (FT1 <= 259.96)
+      tmp1 = 112.8;
+    else if (FT1 <= 260.224)
+      tmp1 = 112.9;
+    else if (FT1 <= 260.488)
+      tmp1 = 113;
+  } else if (FT1 <= 262.87) {
+    if (FT1 == 260.488)
+      tmp1 = 113;
+    else if (FT1 <= 260.752)
+      tmp1 = 113.1;
+    else if (FT1 <= 261.017)
+      tmp1 = 113.2;
+    else if (FT1 <= 261.281)
+      tmp1 = 113.3;
+    else if (FT1 <= 261.546)
+      tmp1 = 113.4;
+    else if (FT1 <= 261.81)
+      tmp1 = 113.5;
+    else if (FT1 <= 262.075)
+      tmp1 = 113.6;
+    else if (FT1 <= 262.34)
+      tmp1 = 113.7;
+    else if (FT1 <= 262.605)
+      tmp1 = 113.8;
+    else if (FT1 <= 262.87)
+      tmp1 = 113.9;
+    else if (FT1 <= 263.136)
+      tmp1 = 114;
+  } else if (FT1 <= 265.53) {
+    if (FT1 == 263.136)
+      tmp1 = 114;
+    else if (FT1 <= 263.401)
+      tmp1 = 114.1;
+    else if (FT1 <= 263.667)
+      tmp1 = 114.2;
+    else if (FT1 <= 263.933)
+      tmp1 = 114.3;
+    else if (FT1 <= 264.199)
+      tmp1 = 114.4;
+    else if (FT1 <= 264.465)
+      tmp1 = 114.5;
+    else if (FT1 <= 264.731)
+      tmp1 = 114.6;
+    else if (FT1 <= 264.997)
+      tmp1 = 114.7;
+    else if (FT1 <= 265.264)
+      tmp1 = 114.8;
+    else if (FT1 <= 265.53)
+      tmp1 = 114.9;
+    else if (FT1 <= 265.797)
+      tmp1 = 115;
+  } else if (FT1 <= 268.204) {
+    if (FT1 == 265.797)
+      tmp1 = 115;
+    else if (FT1 <= 266.064)
+      tmp1 = 115.1;
+    else if (FT1 <= 266.331)
+      tmp1 = 115.2;
+    else if (FT1 <= 266.598)
+      tmp1 = 115.3;
+    else if (FT1 <= 266.865)
+      tmp1 = 115.4;
+    else if (FT1 <= 267.133)
+      tmp1 = 115.5;
+    else if (FT1 <= 267.401)
+      tmp1 = 115.6;
+    else if (FT1 <= 267.668)
+      tmp1 = 115.7;
+    else if (FT1 <= 267.936)
+      tmp1 = 115.8;
+    else if (FT1 <= 268.204)
+      tmp1 = 115.9;
+    else if (FT1 <= 268.472)
+      tmp1 = 116;
+  } else if (FT1 <= 270.892) {
+    if (FT1 == 268.472)
+      tmp1 = 116;
+    else if (FT1 <= 268.741)
+      tmp1 = 116.1;
+    else if (FT1 <= 269.009)
+      tmp1 = 116.2;
+    else if (FT1 <= 269.278)
+      tmp1 = 116.3;
+    else if (FT1 <= 269.546)
+      tmp1 = 116.4;
+    else if (FT1 <= 269.815)
+      tmp1 = 116.5;
+    else if (FT1 <= 270.084)
+      tmp1 = 116.6;
+    else if (FT1 <= 270.353)
+      tmp1 = 116.7;
+    else if (FT1 <= 270.622)
+      tmp1 = 116.8;
+    else if (FT1 <= 270.892)
+      tmp1 = 116.9;
+    else if (FT1 <= 271.161)
+      tmp1 = 117;
+  } else if (FT1 <= 273.594) {
+    if (FT1 == 271.161)
+      tmp1 = 117;
+    else if (FT1 <= 271.431)
+      tmp1 = 117.1;
+    else if (FT1 <= 271.701)
+      tmp1 = 117.2;
+    else if (FT1 <= 271.971)
+      tmp1 = 117.3;
+    else if (FT1 <= 272.241)
+      tmp1 = 117.4;
+    else if (FT1 <= 272.511)
+      tmp1 = 117.5;
+    else if (FT1 <= 272.782)
+      tmp1 = 117.6;
+    else if (FT1 <= 273.052)
+      tmp1 = 117.7;
+    else if (FT1 <= 273.323)
+      tmp1 = 117.8;
+    else if (FT1 <= 273.594)
+      tmp1 = 117.9;
+    else if (FT1 <= 273.864)
+      tmp1 = 118;
+  } else if (FT1 <= 276.309) {
+    if (FT1 == 273.864)
+      tmp1 = 118;
+    else if (FT1 <= 274.136)
+      tmp1 = 118.1;
+    else if (FT1 <= 274.407)
+      tmp1 = 118.2;
+    else if (FT1 <= 274.678)
+      tmp1 = 118.3;
+    else if (FT1 <= 274.95)
+      tmp1 = 118.4;
+    else if (FT1 <= 275.221)
+      tmp1 = 118.5;
+    else if (FT1 <= 275.493)
+      tmp1 = 118.6;
+    else if (FT1 <= 275.765)
+      tmp1 = 118.7;
+    else if (FT1 <= 276.037)
+      tmp1 = 118.8;
+    else if (FT1 <= 276.309)
+      tmp1 = 118.9;
+    else if (FT1 <= 276.581)
+      tmp1 = 119;
+  } else if (FT1 <= 279.038) {
+    if (FT1 == 276.581)
+      tmp1 = 119;
+    else if (FT1 <= 276.854)
+      tmp1 = 119.1;
+    else if (FT1 <= 277.126)
+      tmp1 = 119.2;
+    else if (FT1 <= 277.399)
+      tmp1 = 119.3;
+    else if (FT1 <= 277.672)
+      tmp1 = 119.4;
+    else if (FT1 <= 277.945)
+      tmp1 = 119.5;
+    else if (FT1 <= 278.218)
+      tmp1 = 119.6;
+    else if (FT1 <= 278.491)
+      tmp1 = 119.7;
+    else if (FT1 <= 278.765)
+      tmp1 = 119.8;
+    else if (FT1 <= 279.038)
+      tmp1 = 119.9;
+    else if (FT1 <= 279.312)
+      tmp1 = 120;
+  } else if (FT1 <= 281.781) {
+    if (FT1 == 279.312)
+      tmp1 = 120;
+    else if (FT1 <= 279.586)
+      tmp1 = 120.1;
+    else if (FT1 <= 279.86)
+      tmp1 = 120.2;
+    else if (FT1 <= 280.134)
+      tmp1 = 120.3;
+    else if (FT1 <= 280.408)
+      tmp1 = 120.4;
+    else if (FT1 <= 280.683)
+      tmp1 = 120.5;
+    else if (FT1 <= 280.957)
+      tmp1 = 120.6;
+    else if (FT1 <= 281.232)
+      tmp1 = 120.7;
+    else if (FT1 <= 281.506)
+      tmp1 = 120.8;
+    else if (FT1 <= 281.781)
+      tmp1 = 120.9;
+    else if (FT1 <= 282.056)
+      tmp1 = 121;
+  } else if (FT1 <= 284.538) {
+    if (FT1 == 282.056)
+      tmp1 = 121;
+    else if (FT1 <= 282.332)
+      tmp1 = 121.1;
+    else if (FT1 <= 282.607)
+      tmp1 = 121.2;
+    else if (FT1 <= 282.883)
+      tmp1 = 121.3;
+    else if (FT1 <= 283.158)
+      tmp1 = 121.4;
+    else if (FT1 <= 283.434)
+      tmp1 = 121.5;
+    else if (FT1 <= 283.71)
+      tmp1 = 121.6;
+    else if (FT1 <= 283.986)
+      tmp1 = 121.7;
+    else if (FT1 <= 284.262)
+      tmp1 = 121.8;
+    else if (FT1 <= 284.538)
+      tmp1 = 121.9;
+    else if (FT1 <= 284.815)
+      tmp1 = 122;
+  } else if (FT1 <= 287.309) {
+    if (FT1 == 284.815)
+      tmp1 = 122;
+    else if (FT1 <= 285.091)
+      tmp1 = 122.1;
+    else if (FT1 <= 285.368)
+      tmp1 = 122.2;
+    else if (FT1 <= 285.645)
+      tmp1 = 122.3;
+    else if (FT1 <= 285.922)
+      tmp1 = 122.4;
+    else if (FT1 <= 286.199)
+      tmp1 = 122.5;
+    else if (FT1 <= 286.476)
+      tmp1 = 122.6;
+    else if (FT1 <= 286.754)
+      tmp1 = 122.7;
+    else if (FT1 <= 287.031)
+      tmp1 = 122.8;
+    else if (FT1 <= 287.309)
+      tmp1 = 122.9;
+    else if (FT1 <= 287.587)
+      tmp1 = 123;
+  } else if (FT1 <= 290.093) {
+    if (FT1 == 287.587)
+      tmp1 = 123;
+    else if (FT1 <= 287.865)
+      tmp1 = 123.1;
+    else if (FT1 <= 288.143)
+      tmp1 = 123.2;
+    else if (FT1 <= 288.421)
+      tmp1 = 123.3;
+    else if (FT1 <= 288.699)
+      tmp1 = 123.4;
+    else if (FT1 <= 288.978)
+      tmp1 = 123.5;
+    else if (FT1 <= 289.257)
+      tmp1 = 123.6;
+    else if (FT1 <= 289.535)
+      tmp1 = 123.7;
+    else if (FT1 <= 289.814)
+      tmp1 = 123.8;
+    else if (FT1 <= 290.093)
+      tmp1 = 123.9;
+    else if (FT1 <= 290.373)
+      tmp1 = 124;
+  } else if (FT1 <= 292.891) {
+    if (FT1 == 290.373)
+      tmp1 = 124;
+    else if (FT1 <= 290.652)
+      tmp1 = 124.1;
+    else if (FT1 <= 290.931)
+      tmp1 = 124.2;
+    else if (FT1 <= 291.211)
+      tmp1 = 124.3;
+    else if (FT1 <= 291.491)
+      tmp1 = 124.4;
+    else if (FT1 <= 291.771)
+      tmp1 = 124.5;
+    else if (FT1 <= 292.051)
+      tmp1 = 124.6;
+    else if (FT1 <= 292.331)
+      tmp1 = 124.7;
+    else if (FT1 <= 292.611)
+      tmp1 = 124.8;
+    else if (FT1 <= 292.891)
+      tmp1 = 124.9;
+    else if (FT1 <= 293.172)
+      tmp1 = 125;
+  } else if (FT1 <= 295.703) {
+    if (FT1 == 293.172)
+      tmp1 = 125;
+    else if (FT1 <= 293.453)
+      tmp1 = 125.1;
+    else if (FT1 <= 293.734)
+      tmp1 = 125.2;
+    else if (FT1 <= 294.015)
+      tmp1 = 125.3;
+    else if (FT1 <= 294.296)
+      tmp1 = 125.4;
+    else if (FT1 <= 294.577)
+      tmp1 = 125.5;
+    else if (FT1 <= 294.858)
+      tmp1 = 125.6;
+    else if (FT1 <= 295.14)
+      tmp1 = 125.7;
+    else if (FT1 <= 295.421)
+      tmp1 = 125.8;
+    else if (FT1 <= 295.703)
+      tmp1 = 125.9;
+    else if (FT1 <= 295.985)
+      tmp1 = 126;
+  } else if (FT1 <= 298.529) {
+    if (FT1 == 295.985)
+      tmp1 = 126;
+    else if (FT1 <= 296.267)
+      tmp1 = 126.1;
+    else if (FT1 <= 296.549)
+      tmp1 = 126.2;
+    else if (FT1 <= 296.832)
+      tmp1 = 126.3;
+    else if (FT1 <= 297.114)
+      tmp1 = 126.4;
+    else if (FT1 <= 297.397)
+      tmp1 = 126.5;
+    else if (FT1 <= 297.68)
+      tmp1 = 126.6;
+    else if (FT1 <= 297.963)
+      tmp1 = 126.7;
+    else if (FT1 <= 298.246)
+      tmp1 = 126.8;
+    else if (FT1 <= 298.529)
+      tmp1 = 126.9;
+    else if (FT1 <= 298.812)
+      tmp1 = 127;
+  } else if (FT1 <= 301.368) {
+    if (FT1 == 298.812)
+      tmp1 = 127;
+    else if (FT1 <= 299.095)
+      tmp1 = 127.1;
+    else if (FT1 <= 299.379)
+      tmp1 = 127.2;
+    else if (FT1 <= 299.663)
+      tmp1 = 127.3;
+    else if (FT1 <= 299.947)
+      tmp1 = 127.4;
+    else if (FT1 <= 300.231)
+      tmp1 = 127.5;
+    else if (FT1 <= 300.515)
+      tmp1 = 127.6;
+    else if (FT1 <= 300.799)
+      tmp1 = 127.7;
+    else if (FT1 <= 301.083)
+      tmp1 = 127.8;
+    else if (FT1 <= 301.368)
+      tmp1 = 127.9;
+    else if (FT1 <= 301.653)
+      tmp1 = 128;
+  } else if (FT1 <= 304.221) {
+    if (FT1 == 301.653)
+      tmp1 = 128;
+    else if (FT1 <= 301.937)
+      tmp1 = 128.1;
+    else if (FT1 <= 302.222)
+      tmp1 = 128.2;
+    else if (FT1 <= 302.507)
+      tmp1 = 128.3;
+    else if (FT1 <= 302.793)
+      tmp1 = 128.4;
+    else if (FT1 <= 303.078)
+      tmp1 = 128.5;
+    else if (FT1 <= 303.363)
+      tmp1 = 128.6;
+    else if (FT1 <= 303.649)
+      tmp1 = 128.7;
+    else if (FT1 <= 303.935)
+      tmp1 = 128.8;
+    else if (FT1 <= 304.221)
+      tmp1 = 128.9;
+    else if (FT1 <= 304.507)
+      tmp1 = 129;
+  } else if (FT1 <= 307.087) {
+    if (FT1 == 304.507)
+      tmp1 = 129;
+    else if (FT1 <= 304.793)
+      tmp1 = 129.1;
+    else if (FT1 <= 305.079)
+      tmp1 = 129.2;
+    else if (FT1 <= 305.366)
+      tmp1 = 129.3;
+    else if (FT1 <= 305.652)
+      tmp1 = 129.4;
+    else if (FT1 <= 305.939)
+      tmp1 = 129.5;
+    else if (FT1 <= 306.226)
+      tmp1 = 129.6;
+    else if (FT1 <= 306.513)
+      tmp1 = 129.7;
+    else if (FT1 <= 306.8)
+      tmp1 = 129.8;
+    else if (FT1 <= 307.087)
+      tmp1 = 129.9;
+    else if (FT1 <= 307.374)
+      tmp1 = 130;
+  } else if (FT1 <= 309.967) {
+    if (FT1 == 307.374)
+      tmp1 = 130;
+    else if (FT1 <= 307.662)
+      tmp1 = 130.1;
+    else if (FT1 <= 307.95)
+      tmp1 = 130.2;
+    else if (FT1 <= 308.237)
+      tmp1 = 130.3;
+    else if (FT1 <= 308.525)
+      tmp1 = 130.4;
+    else if (FT1 <= 308.813)
+      tmp1 = 130.5;
+    else if (FT1 <= 309.102)
+      tmp1 = 130.6;
+    else if (FT1 <= 309.39)
+      tmp1 = 130.7;
+    else if (FT1 <= 309.678)
+      tmp1 = 130.8;
+    else if (FT1 <= 309.967)
+      tmp1 = 130.9;
+    else if (FT1 <= 310.256)
+      tmp1 = 131;
+  } else if (FT1 <= 312.86) {
+    if (FT1 == 310.256)
+      tmp1 = 131;
+    else if (FT1 <= 310.545)
+      tmp1 = 131.1;
+    else if (FT1 <= 310.834)
+      tmp1 = 131.2;
+    else if (FT1 <= 311.123)
+      tmp1 = 131.3;
+    else if (FT1 <= 311.412)
+      tmp1 = 131.4;
+    else if (FT1 <= 311.701)
+      tmp1 = 131.5;
+    else if (FT1 <= 311.991)
+      tmp1 = 131.6;
+    else if (FT1 <= 312.281)
+      tmp1 = 131.7;
+    else if (FT1 <= 312.57)
+      tmp1 = 131.8;
+    else if (FT1 <= 312.86)
+      tmp1 = 131.9;
+    else if (FT1 <= 313.151)
+      tmp1 = 132;
+  } else if (FT1 <= 315.767) {
+    if (FT1 == 313.151)
+      tmp1 = 132;
+    else if (FT1 <= 313.441)
+      tmp1 = 132.1;
+    else if (FT1 <= 313.731)
+      tmp1 = 132.2;
+    else if (FT1 <= 314.022)
+      tmp1 = 132.3;
+    else if (FT1 <= 314.312)
+      tmp1 = 132.4;
+    else if (FT1 <= 314.603)
+      tmp1 = 132.5;
+    else if (FT1 <= 314.894)
+      tmp1 = 132.6;
+    else if (FT1 <= 315.185)
+      tmp1 = 132.7;
+    else if (FT1 <= 315.476)
+      tmp1 = 132.8;
+    else if (FT1 <= 315.767)
+      tmp1 = 132.9;
+    else if (FT1 <= 316.059)
+      tmp1 = 133;
+  } else if (FT1 <= 318.688) {
+    if (FT1 == 316.059)
+      tmp1 = 133;
+    else if (FT1 <= 316.35)
+      tmp1 = 133.1;
+    else if (FT1 <= 316.642)
+      tmp1 = 133.2;
+    else if (FT1 <= 316.934)
+      tmp1 = 133.3;
+    else if (FT1 <= 317.226)
+      tmp1 = 133.4;
+    else if (FT1 <= 317.518)
+      tmp1 = 133.5;
+    else if (FT1 <= 317.81)
+      tmp1 = 133.6;
+    else if (FT1 <= 318.103)
+      tmp1 = 133.7;
+    else if (FT1 <= 318.395)
+      tmp1 = 133.8;
+    else if (FT1 <= 318.688)
+      tmp1 = 133.9;
+    else if (FT1 <= 318.981)
+      tmp1 = 134;
+  } else if (FT1 <= 321.622) {
+    if (FT1 == 318.981)
+      tmp1 = 134;
+    else if (FT1 <= 319.274)
+      tmp1 = 134.1;
+    else if (FT1 <= 319.567)
+      tmp1 = 134.2;
+    else if (FT1 <= 319.86)
+      tmp1 = 134.3;
+    else if (FT1 <= 320.153)
+      tmp1 = 134.4;
+    else if (FT1 <= 320.447)
+      tmp1 = 134.5;
+    else if (FT1 <= 320.74)
+      tmp1 = 134.6;
+    else if (FT1 <= 321.034)
+      tmp1 = 134.7;
+    else if (FT1 <= 321.328)
+      tmp1 = 134.8;
+    else if (FT1 <= 321.622)
+      tmp1 = 134.9;
+    else if (FT1 <= 321.916)
+      tmp1 = 135;
+  } else if (FT1 <= 324.569) {
+    if (FT1 == 321.916)
+      tmp1 = 135;
+    else if (FT1 <= 322.21)
+      tmp1 = 135.1;
+    else if (FT1 <= 322.505)
+      tmp1 = 135.2;
+    else if (FT1 <= 322.799)
+      tmp1 = 135.3;
+    else if (FT1 <= 323.094)
+      tmp1 = 135.4;
+    else if (FT1 <= 323.389)
+      tmp1 = 135.5;
+    else if (FT1 <= 323.684)
+      tmp1 = 135.6;
+    else if (FT1 <= 323.979)
+      tmp1 = 135.7;
+    else if (FT1 <= 324.274)
+      tmp1 = 135.8;
+    else if (FT1 <= 324.569)
+      tmp1 = 135.9;
+    else if (FT1 <= 324.865)
+      tmp1 = 136;
+  } else if (FT1 <= 327.53) {
+    if (FT1 == 324.865)
+      tmp1 = 136;
+    else if (FT1 <= 325.161)
+      tmp1 = 136.1;
+    else if (FT1 <= 325.456)
+      tmp1 = 136.2;
+    else if (FT1 <= 325.752)
+      tmp1 = 136.3;
+    else if (FT1 <= 326.048)
+      tmp1 = 136.4;
+    else if (FT1 <= 326.344)
+      tmp1 = 136.5;
+    else if (FT1 <= 326.641)
+      tmp1 = 136.6;
+    else if (FT1 <= 326.937)
+      tmp1 = 136.7;
+    else if (FT1 <= 327.234)
+      tmp1 = 136.8;
+    else if (FT1 <= 327.53)
+      tmp1 = 136.9;
+    else if (FT1 <= 327.827)
+      tmp1 = 137;
+  } else if (FT1 <= 330.505) {
+    if (FT1 == 327.827)
+      tmp1 = 137;
+    else if (FT1 <= 328.124)
+      tmp1 = 137.1;
+    else if (FT1 <= 328.421)
+      tmp1 = 137.2;
+    else if (FT1 <= 328.718)
+      tmp1 = 137.3;
+    else if (FT1 <= 329.016)
+      tmp1 = 137.4;
+    else if (FT1 <= 329.313)
+      tmp1 = 137.5;
+    else if (FT1 <= 329.611)
+      tmp1 = 137.6;
+    else if (FT1 <= 329.909)
+      tmp1 = 137.7;
+    else if (FT1 <= 330.207)
+      tmp1 = 137.8;
+    else if (FT1 <= 330.505)
+      tmp1 = 137.9;
+    else if (FT1 <= 330.803)
+      tmp1 = 138;
+  } else if (FT1 <= 333.492) {
+    if (FT1 == 330.803)
+      tmp1 = 138;
+    else if (FT1 <= 331.101)
+      tmp1 = 138.1;
+    else if (FT1 <= 331.4)
+      tmp1 = 138.2;
+    else if (FT1 <= 331.698)
+      tmp1 = 138.3;
+    else if (FT1 <= 331.997)
+      tmp1 = 138.4;
+    else if (FT1 <= 332.296)
+      tmp1 = 138.5;
+    else if (FT1 <= 332.595)
+      tmp1 = 138.6;
+    else if (FT1 <= 332.894)
+      tmp1 = 138.7;
+    else if (FT1 <= 333.193)
+      tmp1 = 138.8;
+    else if (FT1 <= 333.492)
+      tmp1 = 138.9;
+    else if (FT1 <= 333.792)
+      tmp1 = 139;
+  } else if (FT1 <= 336.493) {
+    if (FT1 == 333.792)
+      tmp1 = 139;
+    else if (FT1 <= 334.092)
+      tmp1 = 139.1;
+    else if (FT1 <= 334.391)
+      tmp1 = 139.2;
+    else if (FT1 <= 334.691)
+      tmp1 = 139.3;
+    else if (FT1 <= 334.991)
+      tmp1 = 139.4;
+    else if (FT1 <= 335.291)
+      tmp1 = 139.5;
+    else if (FT1 <= 335.592)
+      tmp1 = 139.6;
+    else if (FT1 <= 335.892)
+      tmp1 = 139.7;
+    else if (FT1 <= 336.193)
+      tmp1 = 139.8;
+    else if (FT1 <= 336.493)
+      tmp1 = 139.9;
+    else if (FT1 <= 336.794)
+      tmp1 = 140;
+  } else if (FT1 <= 339.508) {
+    if (FT1 == 336.794)
+      tmp1 = 140;
+    else if (FT1 <= 337.095)
+      tmp1 = 140.1;
+    else if (FT1 <= 337.396)
+      tmp1 = 140.2;
+    else if (FT1 <= 337.698)
+      tmp1 = 140.3;
+    else if (FT1 <= 337.999)
+      tmp1 = 140.4;
+    else if (FT1 <= 338.3)
+      tmp1 = 140.5;
+    else if (FT1 <= 338.602)
+      tmp1 = 140.6;
+    else if (FT1 <= 338.904)
+      tmp1 = 140.7;
+    else if (FT1 <= 339.206)
+      tmp1 = 140.8;
+    else if (FT1 <= 339.508)
+      tmp1 = 140.9;
+    else if (FT1 <= 339.81)
+      tmp1 = 141;
+  } else if (FT1 <= 342.535) {
+    if (FT1 == 339.81)
+      tmp1 = 141;
+    else if (FT1 <= 340.112)
+      tmp1 = 141.1;
+    else if (FT1 <= 340.415)
+      tmp1 = 141.2;
+    else if (FT1 <= 340.717)
+      tmp1 = 141.3;
+    else if (FT1 <= 341.02)
+      tmp1 = 141.4;
+    else if (FT1 <= 341.323)
+      tmp1 = 141.5;
+    else if (FT1 <= 341.626)
+      tmp1 = 141.6;
+    else if (FT1 <= 341.929)
+      tmp1 = 141.7;
+    else if (FT1 <= 342.232)
+      tmp1 = 141.8;
+    else if (FT1 <= 342.535)
+      tmp1 = 141.9;
+    else if (FT1 <= 342.839)
+      tmp1 = 142;
+  } else if (FT1 <= 345.576) {
+    if (FT1 == 342.839)
+      tmp1 = 142;
+    else if (FT1 <= 343.143)
+      tmp1 = 142.1;
+    else if (FT1 <= 343.446)
+      tmp1 = 142.2;
+    else if (FT1 <= 343.75)
+      tmp1 = 142.3;
+    else if (FT1 <= 344.054)
+      tmp1 = 142.4;
+    else if (FT1 <= 344.358)
+      tmp1 = 142.5;
+    else if (FT1 <= 344.663)
+      tmp1 = 142.6;
+    else if (FT1 <= 344.967)
+      tmp1 = 142.7;
+    else if (FT1 <= 345.272)
+      tmp1 = 142.8;
+    else if (FT1 <= 345.576)
+      tmp1 = 142.9;
+    else if (FT1 <= 345.881)
+      tmp1 = 143;
+  } else if (FT1 <= 348.631) {
+    if (FT1 == 345.881)
+      tmp1 = 143;
+    else if (FT1 <= 346.186)
+      tmp1 = 143.1;
+    else if (FT1 <= 346.491)
+      tmp1 = 143.2;
+    else if (FT1 <= 346.797)
+      tmp1 = 143.3;
+    else if (FT1 <= 347.102)
+      tmp1 = 143.4;
+    else if (FT1 <= 347.407)
+      tmp1 = 143.5;
+    else if (FT1 <= 347.713)
+      tmp1 = 143.6;
+    else if (FT1 <= 348.019)
+      tmp1 = 143.7;
+    else if (FT1 <= 348.325)
+      tmp1 = 143.8;
+    else if (FT1 <= 348.631)
+      tmp1 = 143.9;
+    else if (FT1 <= 348.937)
+      tmp1 = 144;
+  } else if (FT1 <= 351.698) {
+    if (FT1 == 348.937)
+      tmp1 = 144;
+    else if (FT1 <= 349.243)
+      tmp1 = 144.1;
+    else if (FT1 <= 349.55)
+      tmp1 = 144.2;
+    else if (FT1 <= 349.856)
+      tmp1 = 144.3;
+    else if (FT1 <= 350.163)
+      tmp1 = 144.4;
+    else if (FT1 <= 350.47)
+      tmp1 = 144.5;
+    else if (FT1 <= 350.777)
+      tmp1 = 144.6;
+    else if (FT1 <= 351.084)
+      tmp1 = 144.7;
+    else if (FT1 <= 351.391)
+      tmp1 = 144.8;
+    else if (FT1 <= 351.698)
+      tmp1 = 144.9;
+    else if (FT1 <= 352.006)
+      tmp1 = 145;
+  } else if (FT1 <= 354.779) {
+    if (FT1 == 352.006)
+      tmp1 = 145;
+    else if (FT1 <= 352.313)
+      tmp1 = 145.1;
+    else if (FT1 <= 352.621)
+      tmp1 = 145.2;
+    else if (FT1 <= 352.929)
+      tmp1 = 145.3;
+    else if (FT1 <= 353.237)
+      tmp1 = 145.4;
+    else if (FT1 <= 353.545)
+      tmp1 = 145.5;
+    else if (FT1 <= 353.853)
+      tmp1 = 145.6;
+    else if (FT1 <= 354.162)
+      tmp1 = 145.7;
+    else if (FT1 <= 354.47)
+      tmp1 = 145.8;
+    else if (FT1 <= 354.779)
+      tmp1 = 145.9;
+    else if (FT1 <= 355.088)
+      tmp1 = 146;
+  } else if (FT1 <= 357.873) {
+    if (FT1 == 355.088)
+      tmp1 = 146;
+    else if (FT1 <= 355.397)
+      tmp1 = 146.1;
+    else if (FT1 <= 355.706)
+      tmp1 = 146.2;
+    else if (FT1 <= 356.015)
+      tmp1 = 146.3;
+    else if (FT1 <= 356.324)
+      tmp1 = 146.4;
+    else if (FT1 <= 356.634)
+      tmp1 = 146.5;
+    else if (FT1 <= 356.943)
+      tmp1 = 146.6;
+    else if (FT1 <= 357.253)
+      tmp1 = 146.7;
+    else if (FT1 <= 357.563)
+      tmp1 = 146.8;
+    else if (FT1 <= 357.873)
+      tmp1 = 146.9;
+    else if (FT1 <= 358.183)
+      tmp1 = 147;
+  } else if (FT1 <= 360.98) {
+    if (FT1 == 358.183)
+      tmp1 = 147;
+    else if (FT1 <= 358.493)
+      tmp1 = 147.1;
+    else if (FT1 <= 358.803)
+      tmp1 = 147.2;
+    else if (FT1 <= 359.114)
+      tmp1 = 147.3;
+    else if (FT1 <= 359.424)
+      tmp1 = 147.4;
+    else if (FT1 <= 359.735)
+      tmp1 = 147.5;
+    else if (FT1 <= 360.046)
+      tmp1 = 147.6;
+    else if (FT1 <= 360.357)
+      tmp1 = 147.7;
+    else if (FT1 <= 360.668)
+      tmp1 = 147.8;
+    else if (FT1 <= 360.98)
+      tmp1 = 147.9;
+    else if (FT1 <= 361.291)
+      tmp1 = 148;
+  } else if (FT1 <= 364.1) {
+    if (FT1 == 361.291)
+      tmp1 = 148;
+    else if (FT1 <= 361.603)
+      tmp1 = 148.1;
+    else if (FT1 <= 361.914)
+      tmp1 = 148.2;
+    else if (FT1 <= 362.226)
+      tmp1 = 148.3;
+    else if (FT1 <= 362.538)
+      tmp1 = 148.4;
+    else if (FT1 <= 362.85)
+      tmp1 = 148.5;
+    else if (FT1 <= 363.162)
+      tmp1 = 148.6;
+    else if (FT1 <= 363.475)
+      tmp1 = 148.7;
+    else if (FT1 <= 363.787)
+      tmp1 = 148.8;
+    else if (FT1 <= 364.1)
+      tmp1 = 148.9;
+    else if (FT1 <= 364.412)
+      tmp1 = 149;
+  } else if (FT1 <= 367.233) {
+    if (FT1 == 364.412)
+      tmp1 = 149;
+    else if (FT1 <= 364.725)
+      tmp1 = 149.1;
+    else if (FT1 <= 365.038)
+      tmp1 = 149.2;
+    else if (FT1 <= 365.351)
+      tmp1 = 149.3;
+    else if (FT1 <= 365.665)
+      tmp1 = 149.4;
+    else if (FT1 <= 365.978)
+      tmp1 = 149.5;
+    else if (FT1 <= 366.292)
+      tmp1 = 149.6;
+    else if (FT1 <= 366.605)
+      tmp1 = 149.7;
+    else if (FT1 <= 366.919)
+      tmp1 = 149.8;
+    else if (FT1 <= 367.233)
+      tmp1 = 149.9;
+    else if (FT1 <= 367.547)
+      tmp1 = 150;
+  } else if (FT1 <= 370.379) {
+    if (FT1 == 367.547)
+      tmp1 = 150;
+    else if (FT1 <= 367.861)
+      tmp1 = 150.1;
+    else if (FT1 <= 368.175)
+      tmp1 = 150.2;
+    else if (FT1 <= 368.49)
+      tmp1 = 150.3;
+    else if (FT1 <= 368.804)
+      tmp1 = 150.4;
+    else if (FT1 <= 369.119)
+      tmp1 = 150.5;
+    else if (FT1 <= 369.434)
+      tmp1 = 150.6;
+    else if (FT1 <= 369.749)
+      tmp1 = 150.7;
+    else if (FT1 <= 370.064)
+      tmp1 = 150.8;
+    else if (FT1 <= 370.379)
+      tmp1 = 150.9;
+    else if (FT1 <= 370.695)
+      tmp1 = 151;
+  } else if (FT1 <= 373.538) {
+    if (FT1 == 370.695)
+      tmp1 = 151;
+    else if (FT1 <= 371.01)
+      tmp1 = 151.1;
+    else if (FT1 <= 371.326)
+      tmp1 = 151.2;
+    else if (FT1 <= 371.641)
+      tmp1 = 151.3;
+    else if (FT1 <= 371.957)
+      tmp1 = 151.4;
+    else if (FT1 <= 372.273)
+      tmp1 = 151.5;
+    else if (FT1 <= 372.589)
+      tmp1 = 151.6;
+    else if (FT1 <= 372.906)
+      tmp1 = 151.7;
+    else if (FT1 <= 373.222)
+      tmp1 = 151.8;
+    else if (FT1 <= 373.538)
+      tmp1 = 151.9;
+    else if (FT1 <= 373.855)
+      tmp1 = 152;
+  } else if (FT1 <= 376.711) {
+    if (FT1 == 373.855)
+      tmp1 = 152;
+    else if (FT1 <= 374.172)
+      tmp1 = 152.1;
+    else if (FT1 <= 374.489)
+      tmp1 = 152.2;
+    else if (FT1 <= 374.806)
+      tmp1 = 152.3;
+    else if (FT1 <= 375.123)
+      tmp1 = 152.4;
+    else if (FT1 <= 375.44)
+      tmp1 = 152.5;
+    else if (FT1 <= 375.758)
+      tmp1 = 152.6;
+    else if (FT1 <= 376.075)
+      tmp1 = 152.7;
+    else if (FT1 <= 376.393)
+      tmp1 = 152.8;
+    else if (FT1 <= 376.711)
+      tmp1 = 152.9;
+    else if (FT1 <= 377.029)
+      tmp1 = 153;
+  } else if (FT1 <= 379.896) {
+    if (FT1 == 377.029)
+      tmp1 = 153;
+    else if (FT1 <= 377.347)
+      tmp1 = 153.1;
+    else if (FT1 <= 377.665)
+      tmp1 = 153.2;
+    else if (FT1 <= 377.983)
+      tmp1 = 153.3;
+    else if (FT1 <= 378.302)
+      tmp1 = 153.4;
+    else if (FT1 <= 378.62)
+      tmp1 = 153.5;
+    else if (FT1 <= 378.939)
+      tmp1 = 153.6;
+    else if (FT1 <= 379.258)
+      tmp1 = 153.7;
+    else if (FT1 <= 379.577)
+      tmp1 = 153.8;
+    else if (FT1 <= 379.896)
+      tmp1 = 153.9;
+    else if (FT1 <= 380.215)
+      tmp1 = 154;
+  } else if (FT1 <= 383.094) {
+    if (FT1 == 380.215)
+      tmp1 = 154;
+    else if (FT1 <= 380.535)
+      tmp1 = 154.1;
+    else if (FT1 <= 380.854)
+      tmp1 = 154.2;
+    else if (FT1 <= 381.174)
+      tmp1 = 154.3;
+    else if (FT1 <= 381.494)
+      tmp1 = 154.4;
+    else if (FT1 <= 381.813)
+      tmp1 = 154.5;
+    else if (FT1 <= 382.134)
+      tmp1 = 154.6;
+    else if (FT1 <= 382.454)
+      tmp1 = 154.7;
+    else if (FT1 <= 382.774)
+      tmp1 = 154.8;
+    else if (FT1 <= 383.094)
+      tmp1 = 154.9;
+    else if (FT1 <= 383.415)
+      tmp1 = 155;
+  } else if (FT1 <= 386.306) {
+    if (FT1 == 383.415)
+      tmp1 = 155;
+    else if (FT1 <= 383.736)
+      tmp1 = 155.1;
+    else if (FT1 <= 384.056)
+      tmp1 = 155.2;
+    else if (FT1 <= 384.377)
+      tmp1 = 155.3;
+    else if (FT1 <= 384.698)
+      tmp1 = 155.4;
+    else if (FT1 <= 385.02)
+      tmp1 = 155.5;
+    else if (FT1 <= 385.341)
+      tmp1 = 155.6;
+    else if (FT1 <= 385.662)
+      tmp1 = 155.7;
+    else if (FT1 <= 385.984)
+      tmp1 = 155.8;
+    else if (FT1 <= 386.306)
+      tmp1 = 155.9;
+    else if (FT1 <= 386.627)
+      tmp1 = 156;
+  } else if (FT1 <= 389.53) {
+    if (FT1 == 386.627)
+      tmp1 = 156;
+    else if (FT1 <= 386.949)
+      tmp1 = 156.1;
+    else if (FT1 <= 387.271)
+      tmp1 = 156.2;
+    else if (FT1 <= 387.594)
+      tmp1 = 156.3;
+    else if (FT1 <= 387.916)
+      tmp1 = 156.4;
+    else if (FT1 <= 388.238)
+      tmp1 = 156.5;
+    else if (FT1 <= 388.561)
+      tmp1 = 156.6;
+    else if (FT1 <= 388.884)
+      tmp1 = 156.7;
+    else if (FT1 <= 389.207)
+      tmp1 = 156.8;
+    else if (FT1 <= 389.53)
+      tmp1 = 156.9;
+    else if (FT1 <= 389.853)
+      tmp1 = 157;
+  } else if (FT1 <= 392.767) {
+    if (FT1 == 389.853)
+      tmp1 = 157;
+    else if (FT1 <= 390.176)
+      tmp1 = 157.1;
+    else if (FT1 <= 390.499)
+      tmp1 = 157.2;
+    else if (FT1 <= 390.823)
+      tmp1 = 157.3;
+    else if (FT1 <= 391.147)
+      tmp1 = 157.4;
+    else if (FT1 <= 391.47)
+      tmp1 = 157.5;
+    else if (FT1 <= 391.794)
+      tmp1 = 157.6;
+    else if (FT1 <= 392.118)
+      tmp1 = 157.7;
+    else if (FT1 <= 392.442)
+      tmp1 = 157.8;
+    else if (FT1 <= 392.767)
+      tmp1 = 157.9;
+    else if (FT1 <= 393.091)
+      tmp1 = 158;
+  } else if (FT1 <= 396.016) {
+    if (FT1 == 393.091)
+      tmp1 = 158;
+    else if (FT1 <= 393.416)
+      tmp1 = 158.1;
+    else if (FT1 <= 393.74)
+      tmp1 = 158.2;
+    else if (FT1 <= 394.065)
+      tmp1 = 158.3;
+    else if (FT1 <= 394.39)
+      tmp1 = 158.4;
+    else if (FT1 <= 394.715)
+      tmp1 = 158.5;
+    else if (FT1 <= 395.04)
+      tmp1 = 158.6;
+    else if (FT1 <= 395.365)
+      tmp1 = 158.7;
+    else if (FT1 <= 395.691)
+      tmp1 = 158.8;
+    else if (FT1 <= 396.016)
+      tmp1 = 158.9;
+    else if (FT1 <= 396.342)
+      tmp1 = 159;
+  } else if (FT1 <= 399.279) {
+    if (FT1 == 396.342)
+      tmp1 = 159;
+    else if (FT1 <= 396.668)
+      tmp1 = 159.1;
+    else if (FT1 <= 396.994)
+      tmp1 = 159.2;
+    else if (FT1 <= 397.32)
+      tmp1 = 159.3;
+    else if (FT1 <= 397.646)
+      tmp1 = 159.4;
+    else if (FT1 <= 397.972)
+      tmp1 = 159.5;
+    else if (FT1 <= 398.299)
+      tmp1 = 159.6;
+    else if (FT1 <= 398.626)
+      tmp1 = 159.7;
+    else if (FT1 <= 398.952)
+      tmp1 = 159.8;
+    else if (FT1 <= 399.279)
+      tmp1 = 159.9;
+    else if (FT1 <= 399.606)
+      tmp1 = 160;
+  } else if (FT1 <= 402.555) {
+    if (FT1 == 399.606)
+      tmp1 = 160;
+    else if (FT1 <= 399.933)
+      tmp1 = 160.1;
+    else if (FT1 <= 400.26)
+      tmp1 = 160.2;
+    else if (FT1 <= 400.588)
+      tmp1 = 160.3;
+    else if (FT1 <= 400.915)
+      tmp1 = 160.4;
+    else if (FT1 <= 401.243)
+      tmp1 = 160.5;
+    else if (FT1 <= 401.571)
+      tmp1 = 160.6;
+    else if (FT1 <= 401.898)
+      tmp1 = 160.7;
+    else if (FT1 <= 402.226)
+      tmp1 = 160.8;
+    else if (FT1 <= 402.555)
+      tmp1 = 160.9;
+    else if (FT1 <= 402.883)
+      tmp1 = 161;
+  } else if (FT1 <= 405.843) {
+    if (FT1 == 402.883)
+      tmp1 = 161;
+    else if (FT1 <= 403.211)
+      tmp1 = 161.1;
+    else if (FT1 <= 403.54)
+      tmp1 = 161.2;
+    else if (FT1 <= 403.868)
+      tmp1 = 161.3;
+    else if (FT1 <= 404.197)
+      tmp1 = 161.4;
+    else if (FT1 <= 404.526)
+      tmp1 = 161.5;
+    else if (FT1 <= 404.855)
+      tmp1 = 161.6;
+    else if (FT1 <= 405.184)
+      tmp1 = 161.7;
+    else if (FT1 <= 405.513)
+      tmp1 = 161.8;
+    else if (FT1 <= 405.843)
+      tmp1 = 161.9;
+    else if (FT1 <= 406.172)
+      tmp1 = 162;
+  } else if (FT1 <= 409.144) {
+    if (FT1 == 406.172)
+      tmp1 = 162;
+    else if (FT1 <= 406.502)
+      tmp1 = 162.1;
+    else if (FT1 <= 406.832)
+      tmp1 = 162.2;
+    else if (FT1 <= 407.162)
+      tmp1 = 162.3;
+    else if (FT1 <= 407.492)
+      tmp1 = 162.4;
+    else if (FT1 <= 407.822)
+      tmp1 = 162.5;
+    else if (FT1 <= 408.152)
+      tmp1 = 162.6;
+    else if (FT1 <= 408.482)
+      tmp1 = 162.7;
+    else if (FT1 <= 408.813)
+      tmp1 = 162.8;
+    else if (FT1 <= 409.144)
+      tmp1 = 162.9;
+    else if (FT1 <= 409.474)
+      tmp1 = 163;
+  } else if (FT1 <= 412.457) {
+    if (FT1 == 409.474)
+      tmp1 = 163;
+    else if (FT1 <= 409.805)
+      tmp1 = 163.1;
+    else if (FT1 <= 410.136)
+      tmp1 = 163.2;
+    else if (FT1 <= 410.468)
+      tmp1 = 163.3;
+    else if (FT1 <= 410.799)
+      tmp1 = 163.4;
+    else if (FT1 <= 411.13)
+      tmp1 = 163.5;
+    else if (FT1 <= 411.462)
+      tmp1 = 163.6;
+    else if (FT1 <= 411.794)
+      tmp1 = 163.7;
+    else if (FT1 <= 412.125)
+      tmp1 = 163.8;
+    else if (FT1 <= 412.457)
+      tmp1 = 163.9;
+    else if (FT1 <= 412.789)
+      tmp1 = 164;
+  } else if (FT1 <= 415.784) {
+    if (FT1 == 412.789)
+      tmp1 = 164;
+    else if (FT1 <= 413.122)
+      tmp1 = 164.1;
+    else if (FT1 <= 413.454)
+      tmp1 = 164.2;
+    else if (FT1 <= 413.786)
+      tmp1 = 164.3;
+    else if (FT1 <= 414.119)
+      tmp1 = 164.4;
+    else if (FT1 <= 414.452)
+      tmp1 = 164.5;
+    else if (FT1 <= 414.784)
+      tmp1 = 164.6;
+    else if (FT1 <= 415.117)
+      tmp1 = 164.7;
+    else if (FT1 <= 415.45)
+      tmp1 = 164.8;
+    else if (FT1 <= 415.784)
+      tmp1 = 164.9;
+    else if (FT1 <= 416.117)
+      tmp1 = 165;
+  } else if (FT1 <= 419.123) {
+    if (FT1 == 416.117)
+      tmp1 = 165;
+    else if (FT1 <= 416.45)
+      tmp1 = 165.1;
+    else if (FT1 <= 416.784)
+      tmp1 = 165.2;
+    else if (FT1 <= 417.118)
+      tmp1 = 165.3;
+    else if (FT1 <= 417.452)
+      tmp1 = 165.4;
+    else if (FT1 <= 417.785)
+      tmp1 = 165.5;
+    else if (FT1 <= 418.12)
+      tmp1 = 165.6;
+    else if (FT1 <= 418.454)
+      tmp1 = 165.7;
+    else if (FT1 <= 418.788)
+      tmp1 = 165.8;
+    else if (FT1 <= 419.123)
+      tmp1 = 165.9;
+    else if (FT1 <= 419.457)
+      tmp1 = 166;
+  } else if (FT1 <= 422.474) {
+    if (FT1 == 419.457)
+      tmp1 = 166;
+    else if (FT1 <= 419.792)
+      tmp1 = 166.1;
+    else if (FT1 <= 420.127)
+      tmp1 = 166.2;
+    else if (FT1 <= 420.462)
+      tmp1 = 166.3;
+    else if (FT1 <= 420.797)
+      tmp1 = 166.4;
+    else if (FT1 <= 421.132)
+      tmp1 = 166.5;
+    else if (FT1 <= 421.467)
+      tmp1 = 166.6;
+    else if (FT1 <= 421.803)
+      tmp1 = 166.7;
+    else if (FT1 <= 422.138)
+      tmp1 = 166.8;
+    else if (FT1 <= 422.474)
+      tmp1 = 166.9;
+    else if (FT1 <= 422.81)
+      tmp1 = 167;
+  } else if (FT1 <= 425.838) {
+    if (FT1 == 422.81)
+      tmp1 = 167;
+    else if (FT1 <= 423.146)
+      tmp1 = 167.1;
+    else if (FT1 <= 423.482)
+      tmp1 = 167.2;
+    else if (FT1 <= 423.818)
+      tmp1 = 167.3;
+    else if (FT1 <= 424.155)
+      tmp1 = 167.4;
+    else if (FT1 <= 424.491)
+      tmp1 = 167.5;
+    else if (FT1 <= 424.828)
+      tmp1 = 167.6;
+    else if (FT1 <= 425.165)
+      tmp1 = 167.7;
+    else if (FT1 <= 425.501)
+      tmp1 = 167.8;
+    else if (FT1 <= 425.838)
+      tmp1 = 167.9;
+    else if (FT1 <= 426.175)
+      tmp1 = 168;
+  } else if (FT1 <= 429.215) {
+    if (FT1 == 426.175)
+      tmp1 = 168;
+    else if (FT1 <= 426.513)
+      tmp1 = 168.1;
+    else if (FT1 <= 426.85)
+      tmp1 = 168.2;
+    else if (FT1 <= 427.188)
+      tmp1 = 168.3;
+    else if (FT1 <= 427.525)
+      tmp1 = 168.4;
+    else if (FT1 <= 427.863)
+      tmp1 = 168.5;
+    else if (FT1 <= 428.201)
+      tmp1 = 168.6;
+    else if (FT1 <= 428.539)
+      tmp1 = 168.7;
+    else if (FT1 <= 428.877)
+      tmp1 = 168.8;
+    else if (FT1 <= 429.215)
+      tmp1 = 168.9;
+    else if (FT1 <= 429.554)
+      tmp1 = 169;
+  } else if (FT1 <= 432.604) {
+    if (FT1 == 429.554)
+      tmp1 = 169;
+    else if (FT1 <= 429.892)
+      tmp1 = 169.1;
+    else if (FT1 <= 430.231)
+      tmp1 = 169.2;
+    else if (FT1 <= 430.569)
+      tmp1 = 169.3;
+    else if (FT1 <= 430.908)
+      tmp1 = 169.4;
+    else if (FT1 <= 431.247)
+      tmp1 = 169.5;
+    else if (FT1 <= 431.586)
+      tmp1 = 169.6;
+    else if (FT1 <= 431.926)
+      tmp1 = 169.7;
+    else if (FT1 <= 432.265)
+      tmp1 = 169.8;
+    else if (FT1 <= 432.604)
+      tmp1 = 169.9;
+    else if (FT1 <= 432.944)
+      tmp1 = 170;
+  } else if (FT1 <= 436.006) {
+    if (FT1 == 432.944)
+      tmp1 = 170;
+    else if (FT1 <= 433.284)
+      tmp1 = 170.1;
+    else if (FT1 <= 433.624)
+      tmp1 = 170.2;
+    else if (FT1 <= 433.964)
+      tmp1 = 170.3;
+    else if (FT1 <= 434.304)
+      tmp1 = 170.4;
+    else if (FT1 <= 434.644)
+      tmp1 = 170.5;
+    else if (FT1 <= 434.984)
+      tmp1 = 170.6;
+    else if (FT1 <= 435.325)
+      tmp1 = 170.7;
+    else if (FT1 <= 435.665)
+      tmp1 = 170.8;
+    else if (FT1 <= 436.006)
+      tmp1 = 170.9;
+    else if (FT1 <= 436.347)
+      tmp1 = 171;
+  } else if (FT1 <= 439.42) {
+    if (FT1 == 436.347)
+      tmp1 = 171;
+    else if (FT1 <= 436.688)
+      tmp1 = 171.1;
+    else if (FT1 <= 437.029)
+      tmp1 = 171.2;
+    else if (FT1 <= 437.37)
+      tmp1 = 171.3;
+    else if (FT1 <= 437.712)
+      tmp1 = 171.4;
+    else if (FT1 <= 438.053)
+      tmp1 = 171.5;
+    else if (FT1 <= 438.395)
+      tmp1 = 171.6;
+    else if (FT1 <= 438.737)
+      tmp1 = 171.7;
+    else if (FT1 <= 439.079)
+      tmp1 = 171.8;
+    else if (FT1 <= 439.42)
+      tmp1 = 171.9;
+    else if (FT1 <= 439.763)
+      tmp1 = 172;
+  } else if (FT1 <= 442.847) {
+    if (FT1 == 439.763)
+      tmp1 = 172;
+    else if (FT1 <= 440.105)
+      tmp1 = 172.1;
+    else if (FT1 <= 440.447)
+      tmp1 = 172.2;
+    else if (FT1 <= 440.79)
+      tmp1 = 172.3;
+    else if (FT1 <= 441.132)
+      tmp1 = 172.4;
+    else if (FT1 <= 441.475)
+      tmp1 = 172.5;
+    else if (FT1 <= 441.818)
+      tmp1 = 172.6;
+    else if (FT1 <= 442.161)
+      tmp1 = 172.7;
+    else if (FT1 <= 442.504)
+      tmp1 = 172.8;
+    else if (FT1 <= 442.847)
+      tmp1 = 172.9;
+    else if (FT1 <= 443.191)
+      tmp1 = 173;
+  } else if (FT1 <= 446.286) {
+    if (FT1 == 443.191)
+      tmp1 = 173;
+    else if (FT1 <= 443.534)
+      tmp1 = 173.1;
+    else if (FT1 <= 443.878)
+      tmp1 = 173.2;
+    else if (FT1 <= 444.221)
+      tmp1 = 173.3;
+    else if (FT1 <= 444.565)
+      tmp1 = 173.4;
+    else if (FT1 <= 444.909)
+      tmp1 = 173.5;
+    else if (FT1 <= 445.253)
+      tmp1 = 173.6;
+    else if (FT1 <= 445.598)
+      tmp1 = 173.7;
+    else if (FT1 <= 445.942)
+      tmp1 = 173.8;
+    else if (FT1 <= 446.286)
+      tmp1 = 173.9;
+    else if (FT1 <= 446.631)
+      tmp1 = 174;
+  } else if (FT1 <= 449.738) {
+    if (FT1 == 446.631)
+      tmp1 = 174;
+    else if (FT1 <= 446.976)
+      tmp1 = 174.1;
+    else if (FT1 <= 447.321)
+      tmp1 = 174.2;
+    else if (FT1 <= 447.665)
+      tmp1 = 174.3;
+    else if (FT1 <= 448.011)
+      tmp1 = 174.4;
+    else if (FT1 <= 448.356)
+      tmp1 = 174.5;
+    else if (FT1 <= 448.701)
+      tmp1 = 174.6;
+    else if (FT1 <= 449.047)
+      tmp1 = 174.7;
+    else if (FT1 <= 449.392)
+      tmp1 = 174.8;
+    else if (FT1 <= 449.738)
+      tmp1 = 174.9;
+    else if (FT1 <= 450.084)
+      tmp1 = 175;
+  } else if (FT1 <= 453.202) {
+    if (FT1 == 450.084)
+      tmp1 = 175;
+    else if (FT1 <= 450.43)
+      tmp1 = 175.1;
+    else if (FT1 <= 450.776)
+      tmp1 = 175.2;
+    else if (FT1 <= 451.122)
+      tmp1 = 175.3;
+    else if (FT1 <= 451.468)
+      tmp1 = 175.4;
+    else if (FT1 <= 451.815)
+      tmp1 = 175.5;
+    else if (FT1 <= 452.161)
+      tmp1 = 175.6;
+    else if (FT1 <= 452.508)
+      tmp1 = 175.7;
+    else if (FT1 <= 452.855)
+      tmp1 = 175.8;
+    else if (FT1 <= 453.202)
+      tmp1 = 175.9;
+    else if (FT1 <= 453.549)
+      tmp1 = 176;
+  } else if (FT1 <= 456.678) {
+    if (FT1 == 453.549)
+      tmp1 = 176;
+    else if (FT1 <= 453.896)
+      tmp1 = 176.1;
+    else if (FT1 <= 454.243)
+      tmp1 = 176.2;
+    else if (FT1 <= 454.591)
+      tmp1 = 176.3;
+    else if (FT1 <= 454.938)
+      tmp1 = 176.4;
+    else if (FT1 <= 455.286)
+      tmp1 = 176.5;
+    else if (FT1 <= 455.634)
+      tmp1 = 176.6;
+    else if (FT1 <= 455.982)
+      tmp1 = 176.7;
+    else if (FT1 <= 456.33)
+      tmp1 = 176.8;
+    else if (FT1 <= 456.678)
+      tmp1 = 176.9;
+    else if (FT1 <= 457.026)
+      tmp1 = 177;
+  } else if (FT1 <= 460.167) {
+    if (FT1 == 457.026)
+      tmp1 = 177;
+    else if (FT1 <= 457.375)
+      tmp1 = 177.1;
+    else if (FT1 <= 457.723)
+      tmp1 = 177.2;
+    else if (FT1 <= 458.072)
+      tmp1 = 177.3;
+    else if (FT1 <= 458.421)
+      tmp1 = 177.4;
+    else if (FT1 <= 458.77)
+      tmp1 = 177.5;
+    else if (FT1 <= 459.119)
+      tmp1 = 177.6;
+    else if (FT1 <= 459.468)
+      tmp1 = 177.7;
+    else if (FT1 <= 459.817)
+      tmp1 = 177.8;
+    else if (FT1 <= 460.167)
+      tmp1 = 177.9;
+    else if (FT1 <= 460.516)
+      tmp1 = 178;
+  } else if (FT1 <= 463.667) {
+    if (FT1 == 460.516)
+      tmp1 = 178;
+    else if (FT1 <= 460.866)
+      tmp1 = 178.1;
+    else if (FT1 <= 461.215)
+      tmp1 = 178.2;
+    else if (FT1 <= 461.565)
+      tmp1 = 178.3;
+    else if (FT1 <= 461.915)
+      tmp1 = 178.4;
+    else if (FT1 <= 462.266)
+      tmp1 = 178.5;
+    else if (FT1 <= 462.616)
+      tmp1 = 178.6;
+    else if (FT1 <= 462.966)
+      tmp1 = 178.7;
+    else if (FT1 <= 463.317)
+      tmp1 = 178.8;
+    else if (FT1 <= 463.667)
+      tmp1 = 178.9;
+    else if (FT1 <= 464.018)
+      tmp1 = 179;
+  } else if (FT1 <= 467.18) {
+    if (FT1 == 464.018)
+      tmp1 = 179;
+    else if (FT1 <= 464.369)
+      tmp1 = 179.1;
+    else if (FT1 <= 464.72)
+      tmp1 = 179.2;
+    else if (FT1 <= 465.071)
+      tmp1 = 179.3;
+    else if (FT1 <= 465.422)
+      tmp1 = 179.4;
+    else if (FT1 <= 465.774)
+      tmp1 = 179.5;
+    else if (FT1 <= 466.125)
+      tmp1 = 179.6;
+    else if (FT1 <= 466.477)
+      tmp1 = 179.7;
+    else if (FT1 <= 466.829)
+      tmp1 = 179.8;
+    else if (FT1 <= 467.18)
+      tmp1 = 179.9;
+    else if (FT1 <= 467.532)
+      tmp1 = 180;
+  } else if (FT1 <= 470.706) {
+    if (FT1 == 467.532)
+      tmp1 = 180;
+    else if (FT1 <= 467.884)
+      tmp1 = 180.1;
+    else if (FT1 <= 468.237)
+      tmp1 = 180.2;
+    else if (FT1 <= 468.589)
+      tmp1 = 180.3;
+    else if (FT1 <= 468.941)
+      tmp1 = 180.4;
+    else if (FT1 <= 469.294)
+      tmp1 = 180.5;
+    else if (FT1 <= 469.647)
+      tmp1 = 180.6;
+    else if (FT1 <= 470)
+      tmp1 = 180.7;
+    else if (FT1 <= 470.353)
+      tmp1 = 180.8;
+    else if (FT1 <= 470.706)
+      tmp1 = 180.9;
+    else if (FT1 <= 471.059)
+      tmp1 = 181;
+  } else if (FT1 <= 474.243) {
+    if (FT1 == 471.059)
+      tmp1 = 181;
+    else if (FT1 <= 471.412)
+      tmp1 = 181.1;
+    else if (FT1 <= 471.766)
+      tmp1 = 181.2;
+    else if (FT1 <= 472.119)
+      tmp1 = 181.3;
+    else if (FT1 <= 472.473)
+      tmp1 = 181.4;
+    else if (FT1 <= 472.827)
+      tmp1 = 181.5;
+    else if (FT1 <= 473.181)
+      tmp1 = 181.6;
+    else if (FT1 <= 473.535)
+      tmp1 = 181.7;
+    else if (FT1 <= 473.889)
+      tmp1 = 181.8;
+    else if (FT1 <= 474.243)
+      tmp1 = 181.9;
+    else if (FT1 <= 474.597)
+      tmp1 = 182;
+  } else if (FT1 <= 477.793) {
+    if (FT1 == 474.597)
+      tmp1 = 182;
+    else if (FT1 <= 474.952)
+      tmp1 = 182.1;
+    else if (FT1 <= 475.307)
+      tmp1 = 182.2;
+    else if (FT1 <= 475.661)
+      tmp1 = 182.3;
+    else if (FT1 <= 476.016)
+      tmp1 = 182.4;
+    else if (FT1 <= 476.371)
+      tmp1 = 182.5;
+    else if (FT1 <= 476.727)
+      tmp1 = 182.6;
+    else if (FT1 <= 477.082)
+      tmp1 = 182.7;
+    else if (FT1 <= 477.437)
+      tmp1 = 182.8;
+    else if (FT1 <= 477.793)
+      tmp1 = 182.9;
+    else if (FT1 <= 478.148)
+      tmp1 = 183;
+  } else if (FT1 <= 481.354) {
+    if (FT1 == 478.148)
+      tmp1 = 183;
+    else if (FT1 <= 478.504)
+      tmp1 = 183.1;
+    else if (FT1 <= 478.86)
+      tmp1 = 183.2;
+    else if (FT1 <= 479.216)
+      tmp1 = 183.3;
+    else if (FT1 <= 479.572)
+      tmp1 = 183.4;
+    else if (FT1 <= 479.928)
+      tmp1 = 183.5;
+    else if (FT1 <= 480.285)
+      tmp1 = 183.6;
+    else if (FT1 <= 480.641)
+      tmp1 = 183.7;
+    else if (FT1 <= 480.998)
+      tmp1 = 183.8;
+    else if (FT1 <= 481.354)
+      tmp1 = 183.9;
+    else if (FT1 <= 481.711)
+      tmp1 = 184;
+  } else if (FT1 <= 484.928) {
+    if (FT1 == 481.711)
+      tmp1 = 184;
+    else if (FT1 <= 482.068)
+      tmp1 = 184.1;
+    else if (FT1 <= 482.425)
+      tmp1 = 184.2;
+    else if (FT1 <= 482.782)
+      tmp1 = 184.3;
+    else if (FT1 <= 483.14)
+      tmp1 = 184.4;
+    else if (FT1 <= 483.497)
+      tmp1 = 184.5;
+    else if (FT1 <= 483.855)
+      tmp1 = 184.6;
+    else if (FT1 <= 484.212)
+      tmp1 = 184.7;
+    else if (FT1 <= 484.57)
+      tmp1 = 184.8;
+    else if (FT1 <= 484.928)
+      tmp1 = 184.9;
+    else if (FT1 <= 485.286)
+      tmp1 = 185;
+  } else if (FT1 <= 488.514) {
+    if (FT1 == 485.286)
+      tmp1 = 185;
+    else if (FT1 <= 485.644)
+      tmp1 = 185.1;
+    else if (FT1 <= 486.003)
+      tmp1 = 185.2;
+    else if (FT1 <= 486.361)
+      tmp1 = 185.3;
+    else if (FT1 <= 486.72)
+      tmp1 = 185.4;
+    else if (FT1 <= 487.078)
+      tmp1 = 185.5;
+    else if (FT1 <= 487.437)
+      tmp1 = 185.6;
+    else if (FT1 <= 487.796)
+      tmp1 = 185.7;
+    else if (FT1 <= 488.155)
+      tmp1 = 185.8;
+    else if (FT1 <= 488.514)
+      tmp1 = 185.9;
+    else if (FT1 <= 488.873)
+      tmp1 = 186;
+  } else if (FT1 <= 492.112) {
+    if (FT1 == 488.873)
+      tmp1 = 186;
+    else if (FT1 <= 489.233)
+      tmp1 = 186.1;
+    else if (FT1 <= 489.592)
+      tmp1 = 186.2;
+    else if (FT1 <= 489.952)
+      tmp1 = 186.3;
+    else if (FT1 <= 490.312)
+      tmp1 = 186.4;
+    else if (FT1 <= 490.671)
+      tmp1 = 186.5;
+    else if (FT1 <= 491.031)
+      tmp1 = 186.6;
+    else if (FT1 <= 491.391)
+      tmp1 = 186.7;
+    else if (FT1 <= 491.752)
+      tmp1 = 186.8;
+    else if (FT1 <= 492.112)
+      tmp1 = 186.9;
+    else if (FT1 <= 492.472)
+      tmp1 = 187;
+  } else if (FT1 <= 495.722) {
+    if (FT1 == 492.472)
+      tmp1 = 187;
+    else if (FT1 <= 492.833)
+      tmp1 = 187.1;
+    else if (FT1 <= 493.194)
+      tmp1 = 187.2;
+    else if (FT1 <= 493.555)
+      tmp1 = 187.3;
+    else if (FT1 <= 493.915)
+      tmp1 = 187.4;
+    else if (FT1 <= 494.277)
+      tmp1 = 187.5;
+    else if (FT1 <= 494.638)
+      tmp1 = 187.6;
+    else if (FT1 <= 494.999)
+      tmp1 = 187.7;
+    else if (FT1 <= 495.36)
+      tmp1 = 187.8;
+    else if (FT1 <= 495.722)
+      tmp1 = 187.9;
+    else if (FT1 <= 496.084)
+      tmp1 = 188;
+  } else if (FT1 <= 499.344) {
+    if (FT1 == 496.084)
+      tmp1 = 188;
+    else if (FT1 <= 496.445)
+      tmp1 = 188.1;
+    else if (FT1 <= 496.807)
+      tmp1 = 188.2;
+    else if (FT1 <= 497.169)
+      tmp1 = 188.3;
+    else if (FT1 <= 497.531)
+      tmp1 = 188.4;
+    else if (FT1 <= 497.894)
+      tmp1 = 188.5;
+    else if (FT1 <= 498.256)
+      tmp1 = 188.6;
+    else if (FT1 <= 498.619)
+      tmp1 = 188.7;
+    else if (FT1 <= 498.981)
+      tmp1 = 188.8;
+    else if (FT1 <= 499.344)
+      tmp1 = 188.9;
+    else if (FT1 <= 499.707)
+      tmp1 = 189;
+  } else if (FT1 <= 502.978) {
+    if (FT1 == 499.707)
+      tmp1 = 189;
+    else if (FT1 <= 500.07)
+      tmp1 = 189.1;
+    else if (FT1 <= 500.433)
+      tmp1 = 189.2;
+    else if (FT1 <= 500.796)
+      tmp1 = 189.3;
+    else if (FT1 <= 501.159)
+      tmp1 = 189.4;
+    else if (FT1 <= 501.523)
+      tmp1 = 189.5;
+    else if (FT1 <= 501.886)
+      tmp1 = 189.6;
+    else if (FT1 <= 502.25)
+      tmp1 = 189.7;
+    else if (FT1 <= 502.614)
+      tmp1 = 189.8;
+    else if (FT1 <= 502.978)
+      tmp1 = 189.9;
+    else if (FT1 <= 503.342)
+      tmp1 = 190;
+  } else if (FT1 <= 506.623) {
+    if (FT1 == 503.342)
+      tmp1 = 190;
+    else if (FT1 <= 503.706)
+      tmp1 = 190.1;
+    else if (FT1 <= 504.07)
+      tmp1 = 190.2;
+    else if (FT1 <= 504.435)
+      tmp1 = 190.3;
+    else if (FT1 <= 504.799)
+      tmp1 = 190.4;
+    else if (FT1 <= 505.164)
+      tmp1 = 190.5;
+    else if (FT1 <= 505.528)
+      tmp1 = 190.6;
+    else if (FT1 <= 505.893)
+      tmp1 = 190.7;
+    else if (FT1 <= 506.258)
+      tmp1 = 190.8;
+    else if (FT1 <= 506.623)
+      tmp1 = 190.9;
+    else if (FT1 <= 506.989)
+      tmp1 = 191;
+  } else if (FT1 <= 510.281) {
+    if (FT1 == 506.989)
+      tmp1 = 191;
+    else if (FT1 <= 507.354)
+      tmp1 = 191.1;
+    else if (FT1 <= 507.72)
+      tmp1 = 191.2;
+    else if (FT1 <= 508.085)
+      tmp1 = 191.3;
+    else if (FT1 <= 508.451)
+      tmp1 = 191.4;
+    else if (FT1 <= 508.817)
+      tmp1 = 191.5;
+    else if (FT1 <= 509.183)
+      tmp1 = 191.6;
+    else if (FT1 <= 509.549)
+      tmp1 = 191.7;
+    else if (FT1 <= 509.915)
+      tmp1 = 191.8;
+    else if (FT1 <= 510.281)
+      tmp1 = 191.9;
+    else if (FT1 <= 510.648)
+      tmp1 = 192;
+  } else if (FT1 <= 513.951) {
+    if (FT1 == 510.648)
+      tmp1 = 192;
+    else if (FT1 <= 511.014)
+      tmp1 = 192.1;
+    else if (FT1 <= 511.381)
+      tmp1 = 192.2;
+    else if (FT1 <= 511.748)
+      tmp1 = 192.3;
+    else if (FT1 <= 512.114)
+      tmp1 = 192.4;
+    else if (FT1 <= 512.481)
+      tmp1 = 192.5;
+    else if (FT1 <= 512.849)
+      tmp1 = 192.6;
+    else if (FT1 <= 513.216)
+      tmp1 = 192.7;
+    else if (FT1 <= 513.583)
+      tmp1 = 192.8;
+    else if (FT1 <= 513.951)
+      tmp1 = 192.9;
+    else if (FT1 <= 514.318)
+      tmp1 = 193;
+  } else if (FT1 <= 517.632) {
+    if (FT1 == 514.318)
+      tmp1 = 193;
+    else if (FT1 <= 514.686)
+      tmp1 = 193.1;
+    else if (FT1 <= 515.054)
+      tmp1 = 193.2;
+    else if (FT1 <= 515.422)
+      tmp1 = 193.3;
+    else if (FT1 <= 515.79)
+      tmp1 = 193.4;
+    else if (FT1 <= 516.158)
+      tmp1 = 193.5;
+    else if (FT1 <= 516.526)
+      tmp1 = 193.6;
+    else if (FT1 <= 516.895)
+      tmp1 = 193.7;
+    else if (FT1 <= 517.263)
+      tmp1 = 193.8;
+    else if (FT1 <= 517.632)
+      tmp1 = 193.9;
+    else if (FT1 <= 518.001)
+      tmp1 = 194;
+  } else if (FT1 <= 521.325) {
+    if (FT1 == 518.001)
+      tmp1 = 194;
+    else if (FT1 <= 518.37)
+      tmp1 = 194.1;
+    else if (FT1 <= 518.739)
+      tmp1 = 194.2;
+    else if (FT1 <= 519.108)
+      tmp1 = 194.3;
+    else if (FT1 <= 519.477)
+      tmp1 = 194.4;
+    else if (FT1 <= 519.846)
+      tmp1 = 194.5;
+    else if (FT1 <= 520.216)
+      tmp1 = 194.6;
+    else if (FT1 <= 520.586)
+      tmp1 = 194.7;
+    else if (FT1 <= 520.955)
+      tmp1 = 194.8;
+    else if (FT1 <= 521.325)
+      tmp1 = 194.9;
+    else if (FT1 <= 521.695)
+      tmp1 = 195;
+  } else if (FT1 <= 525.03) {
+    if (FT1 == 521.695)
+      tmp1 = 195;
+    else if (FT1 <= 522.065)
+      tmp1 = 195.1;
+    else if (FT1 <= 522.435)
+      tmp1 = 195.2;
+    else if (FT1 <= 522.806)
+      tmp1 = 195.3;
+    else if (FT1 <= 523.176)
+      tmp1 = 195.4;
+    else if (FT1 <= 523.547)
+      tmp1 = 195.5;
+    else if (FT1 <= 523.917)
+      tmp1 = 195.6;
+    else if (FT1 <= 524.288)
+      tmp1 = 195.7;
+    else if (FT1 <= 524.659)
+      tmp1 = 195.8;
+    else if (FT1 <= 525.03)
+      tmp1 = 195.9;
+    else if (FT1 <= 525.401)
+      tmp1 = 196;
+  } else if (FT1 <= 528.747) {
+    if (FT1 == 525.401)
+      tmp1 = 196;
+    else if (FT1 <= 525.772)
+      tmp1 = 196.1;
+    else if (FT1 <= 526.144)
+      tmp1 = 196.2;
+    else if (FT1 <= 526.515)
+      tmp1 = 196.3;
+    else if (FT1 <= 526.887)
+      tmp1 = 196.4;
+    else if (FT1 <= 527.259)
+      tmp1 = 196.5;
+    else if (FT1 <= 527.63)
+      tmp1 = 196.6;
+    else if (FT1 <= 528.002)
+      tmp1 = 196.7;
+    else if (FT1 <= 528.374)
+      tmp1 = 196.8;
+    else if (FT1 <= 528.747)
+      tmp1 = 196.9;
+    else if (FT1 <= 529.119)
+      tmp1 = 197;
+  } else if (FT1 <= 532.475) {
+    if (FT1 == 529.119)
+      tmp1 = 197;
+    else if (FT1 <= 529.491)
+      tmp1 = 197.1;
+    else if (FT1 <= 529.864)
+      tmp1 = 197.2;
+    else if (FT1 <= 530.237)
+      tmp1 = 197.3;
+    else if (FT1 <= 530.609)
+      tmp1 = 197.4;
+    else if (FT1 <= 530.982)
+      tmp1 = 197.5;
+    else if (FT1 <= 531.355)
+      tmp1 = 197.6;
+    else if (FT1 <= 531.728)
+      tmp1 = 197.7;
+    else if (FT1 <= 532.102)
+      tmp1 = 197.8;
+    else if (FT1 <= 532.475)
+      tmp1 = 197.9;
+    else if (FT1 <= 532.848)
+      tmp1 = 198;
+  } else if (FT1 <= 536.215) {
+    if (FT1 == 532.848)
+      tmp1 = 198;
+    else if (FT1 <= 533.222)
+      tmp1 = 198.1;
+    else if (FT1 <= 533.596)
+      tmp1 = 198.2;
+    else if (FT1 <= 533.97)
+      tmp1 = 198.3;
+    else if (FT1 <= 534.344)
+      tmp1 = 198.4;
+    else if (FT1 <= 534.718)
+      tmp1 = 198.5;
+    else if (FT1 <= 535.092)
+      tmp1 = 198.6;
+    else if (FT1 <= 535.466)
+      tmp1 = 198.7;
+    else if (FT1 <= 535.84)
+      tmp1 = 198.8;
+    else if (FT1 <= 536.215)
+      tmp1 = 198.9;
+    else if (FT1 <= 536.59)
+      tmp1 = 199;
+  } else if (FT1 <= 539.967) {
+    if (FT1 == 536.59)
+      tmp1 = 199;
+    else if (FT1 <= 536.964)
+      tmp1 = 199.1;
+    else if (FT1 <= 537.339)
+      tmp1 = 199.2;
+    else if (FT1 <= 537.714)
+      tmp1 = 199.3;
+    else if (FT1 <= 538.089)
+      tmp1 = 199.4;
+    else if (FT1 <= 538.465)
+      tmp1 = 199.5;
+    else if (FT1 <= 538.84)
+      tmp1 = 199.6;
+    else if (FT1 <= 539.215)
+      tmp1 = 199.7;
+    else if (FT1 <= 539.591)
+      tmp1 = 199.8;
+    else if (FT1 <= 539.967)
+      tmp1 = 199.9;
+    else if (FT1 <= 540.342)
+      tmp1 = 200;
+  } else if (FT1 <= 543.73) {
+    if (FT1 == 540.342)
+      tmp1 = 200;
+    else if (FT1 <= 540.718)
+      tmp1 = 200.1;
+    else if (FT1 <= 541.094)
+      tmp1 = 200.2;
+    else if (FT1 <= 541.471)
+      tmp1 = 200.3;
+    else if (FT1 <= 541.847)
+      tmp1 = 200.4;
+    else if (FT1 <= 542.223)
+      tmp1 = 200.5;
+    else if (FT1 <= 542.6)
+      tmp1 = 200.6;
+    else if (FT1 <= 542.976)
+      tmp1 = 200.7;
+    else if (FT1 <= 543.353)
+      tmp1 = 200.8;
+    else if (FT1 <= 543.73)
+      tmp1 = 200.9;
+    else if (FT1 <= 544.107)
+      tmp1 = 201;
+  } else if (FT1 <= 547.505) {
+    if (FT1 == 544.107)
+      tmp1 = 201;
+    else if (FT1 <= 544.484)
+      tmp1 = 201.1;
+    else if (FT1 <= 544.861)
+      tmp1 = 201.2;
+    else if (FT1 <= 545.239)
+      tmp1 = 201.3;
+    else if (FT1 <= 545.616)
+      tmp1 = 201.4;
+    else if (FT1 <= 545.994)
+      tmp1 = 201.5;
+    else if (FT1 <= 546.371)
+      tmp1 = 201.6;
+    else if (FT1 <= 546.749)
+      tmp1 = 201.7;
+    else if (FT1 <= 547.127)
+      tmp1 = 201.8;
+    else if (FT1 <= 547.505)
+      tmp1 = 201.9;
+    else if (FT1 <= 547.883)
+      tmp1 = 202;
+  } else if (FT1 <= 551.291) {
+    if (FT1 == 547.883)
+      tmp1 = 202;
+    else if (FT1 <= 548.261)
+      tmp1 = 202.1;
+    else if (FT1 <= 548.64)
+      tmp1 = 202.2;
+    else if (FT1 <= 549.018)
+      tmp1 = 202.3;
+    else if (FT1 <= 549.397)
+      tmp1 = 202.4;
+    else if (FT1 <= 549.775)
+      tmp1 = 202.5;
+    else if (FT1 <= 550.154)
+      tmp1 = 202.6;
+    else if (FT1 <= 550.533)
+      tmp1 = 202.7;
+    else if (FT1 <= 550.912)
+      tmp1 = 202.8;
+    else if (FT1 <= 551.291)
+      tmp1 = 202.9;
+    else if (FT1 <= 551.671)
+      tmp1 = 203;
+  } else if (FT1 <= 555.089) {
+    if (FT1 == 551.671)
+      tmp1 = 203;
+    else if (FT1 <= 552.05)
+      tmp1 = 203.1;
+    else if (FT1 <= 552.429)
+      tmp1 = 203.2;
+    else if (FT1 <= 552.809)
+      tmp1 = 203.3;
+    else if (FT1 <= 553.189)
+      tmp1 = 203.4;
+    else if (FT1 <= 553.569)
+      tmp1 = 203.5;
+    else if (FT1 <= 553.949)
+      tmp1 = 203.6;
+    else if (FT1 <= 554.329)
+      tmp1 = 203.7;
+    else if (FT1 <= 554.709)
+      tmp1 = 203.8;
+    else if (FT1 <= 555.089)
+      tmp1 = 203.9;
+    else if (FT1 <= 555.47)
+      tmp1 = 204;
+  } else if (FT1 <= 558.899) {
+    if (FT1 == 555.47)
+      tmp1 = 204;
+    else if (FT1 <= 555.85)
+      tmp1 = 204.1;
+    else if (FT1 <= 556.231)
+      tmp1 = 204.2;
+    else if (FT1 <= 556.612)
+      tmp1 = 204.3;
+    else if (FT1 <= 556.993)
+      tmp1 = 204.4;
+    else if (FT1 <= 557.374)
+      tmp1 = 204.5;
+    else if (FT1 <= 557.755)
+      tmp1 = 204.6;
+    else if (FT1 <= 558.136)
+      tmp1 = 204.7;
+    else if (FT1 <= 558.517)
+      tmp1 = 204.8;
+    else if (FT1 <= 558.899)
+      tmp1 = 204.9;
+    else if (FT1 <= 559.28)
+      tmp1 = 205;
+  } else if (FT1 <= 562.72) {
+    if (FT1 == 559.28)
+      tmp1 = 205;
+    else if (FT1 <= 559.662)
+      tmp1 = 205.1;
+    else if (FT1 <= 560.044)
+      tmp1 = 205.2;
+    else if (FT1 <= 560.426)
+      tmp1 = 205.3;
+    else if (FT1 <= 560.808)
+      tmp1 = 205.4;
+    else if (FT1 <= 561.19)
+      tmp1 = 205.5;
+    else if (FT1 <= 561.572)
+      tmp1 = 205.6;
+    else if (FT1 <= 561.954)
+      tmp1 = 205.7;
+    else if (FT1 <= 562.337)
+      tmp1 = 205.8;
+    else if (FT1 <= 562.72)
+      tmp1 = 205.9;
+    else if (FT1 <= 563.102)
+      tmp1 = 206;
+  } else if (FT1 <= 566.552) {
+    if (FT1 == 563.102)
+      tmp1 = 206;
+    else if (FT1 <= 563.485)
+      tmp1 = 206.1;
+    else if (FT1 <= 563.868)
+      tmp1 = 206.2;
+    else if (FT1 <= 564.251)
+      tmp1 = 206.3;
+    else if (FT1 <= 564.634)
+      tmp1 = 206.4;
+    else if (FT1 <= 565.018)
+      tmp1 = 206.5;
+    else if (FT1 <= 565.401)
+      tmp1 = 206.6;
+    else if (FT1 <= 565.785)
+      tmp1 = 206.7;
+    else if (FT1 <= 566.168)
+      tmp1 = 206.8;
+    else if (FT1 <= 566.552)
+      tmp1 = 206.9;
+    else if (FT1 <= 566.936)
+      tmp1 = 207;
+  } else if (FT1 <= 570.396) {
+    if (FT1 == 566.936)
+      tmp1 = 207;
+    else if (FT1 <= 567.32)
+      tmp1 = 207.1;
+    else if (FT1 <= 567.704)
+      tmp1 = 207.2;
+    else if (FT1 <= 568.088)
+      tmp1 = 207.3;
+    else if (FT1 <= 568.472)
+      tmp1 = 207.4;
+    else if (FT1 <= 568.857)
+      tmp1 = 207.5;
+    else if (FT1 <= 569.241)
+      tmp1 = 207.6;
+    else if (FT1 <= 569.626)
+      tmp1 = 207.7;
+    else if (FT1 <= 570.011)
+      tmp1 = 207.8;
+    else if (FT1 <= 570.396)
+      tmp1 = 207.9;
+    else if (FT1 <= 570.781)
+      tmp1 = 208;
+  } else if (FT1 <= 574.251) {
+    if (FT1 == 570.781)
+      tmp1 = 208;
+    else if (FT1 <= 571.166)
+      tmp1 = 208.1;
+    else if (FT1 <= 571.551)
+      tmp1 = 208.2;
+    else if (FT1 <= 571.936)
+      tmp1 = 208.3;
+    else if (FT1 <= 572.322)
+      tmp1 = 208.4;
+    else if (FT1 <= 572.707)
+      tmp1 = 208.5;
+    else if (FT1 <= 573.093)
+      tmp1 = 208.6;
+    else if (FT1 <= 573.479)
+      tmp1 = 208.7;
+    else if (FT1 <= 573.865)
+      tmp1 = 208.8;
+    else if (FT1 <= 574.251)
+      tmp1 = 208.9;
+    else if (FT1 <= 574.637)
+      tmp1 = 209;
+  } else if (FT1 <= 578.117) {
+    if (FT1 == 574.637)
+      tmp1 = 209;
+    else if (FT1 <= 575.023)
+      tmp1 = 209.1;
+    else if (FT1 <= 575.41)
+      tmp1 = 209.2;
+    else if (FT1 <= 575.796)
+      tmp1 = 209.3;
+    else if (FT1 <= 576.183)
+      tmp1 = 209.4;
+    else if (FT1 <= 576.569)
+      tmp1 = 209.5;
+    else if (FT1 <= 576.956)
+      tmp1 = 209.6;
+    else if (FT1 <= 577.343)
+      tmp1 = 209.7;
+    else if (FT1 <= 577.73)
+      tmp1 = 209.8;
+    else if (FT1 <= 578.117)
+      tmp1 = 209.9;
+    else if (FT1 <= 578.505)
+      tmp1 = 210;
+  } else if (FT1 <= 581.995) {
+    if (FT1 == 578.505)
+      tmp1 = 210;
+    else if (FT1 <= 578.892)
+      tmp1 = 210.1;
+    else if (FT1 <= 579.279)
+      tmp1 = 210.2;
+    else if (FT1 <= 579.667)
+      tmp1 = 210.3;
+    else if (FT1 <= 580.055)
+      tmp1 = 210.4;
+    else if (FT1 <= 580.443)
+      tmp1 = 210.5;
+    else if (FT1 <= 580.831)
+      tmp1 = 210.6;
+    else if (FT1 <= 581.219)
+      tmp1 = 210.7;
+    else if (FT1 <= 581.607)
+      tmp1 = 210.8;
+    else if (FT1 <= 581.995)
+      tmp1 = 210.9;
+    else if (FT1 <= 582.384)
+      tmp1 = 211;
+  } else if (FT1 <= 585.884) {
+    if (FT1 == 582.384)
+      tmp1 = 211;
+    else if (FT1 <= 582.772)
+      tmp1 = 211.1;
+    else if (FT1 <= 583.161)
+      tmp1 = 211.2;
+    else if (FT1 <= 583.549)
+      tmp1 = 211.3;
+    else if (FT1 <= 583.938)
+      tmp1 = 211.4;
+    else if (FT1 <= 584.327)
+      tmp1 = 211.5;
+    else if (FT1 <= 584.716)
+      tmp1 = 211.6;
+    else if (FT1 <= 585.105)
+      tmp1 = 211.7;
+    else if (FT1 <= 585.495)
+      tmp1 = 211.8;
+    else if (FT1 <= 585.884)
+      tmp1 = 211.9;
+    else if (FT1 <= 586.274)
+      tmp1 = 212;
+  } else if (FT1 <= 589.785) {
+    if (FT1 == 586.274)
+      tmp1 = 212;
+    else if (FT1 <= 586.663)
+      tmp1 = 212.1;
+    else if (FT1 <= 587.053)
+      tmp1 = 212.2;
+    else if (FT1 <= 587.443)
+      tmp1 = 212.3;
+    else if (FT1 <= 587.833)
+      tmp1 = 212.4;
+    else if (FT1 <= 588.223)
+      tmp1 = 212.5;
+    else if (FT1 <= 588.613)
+      tmp1 = 212.6;
+    else if (FT1 <= 589.004)
+      tmp1 = 212.7;
+    else if (FT1 <= 589.394)
+      tmp1 = 212.8;
+    else if (FT1 <= 589.785)
+      tmp1 = 212.9;
+    else if (FT1 <= 590.175)
+      tmp1 = 213;
+  } else if (FT1 <= 593.696) {
+    if (FT1 == 590.175)
+      tmp1 = 213;
+    else if (FT1 <= 590.566)
+      tmp1 = 213.1;
+    else if (FT1 <= 590.957)
+      tmp1 = 213.2;
+    else if (FT1 <= 591.348)
+      tmp1 = 213.3;
+    else if (FT1 <= 591.739)
+      tmp1 = 213.4;
+    else if (FT1 <= 592.13)
+      tmp1 = 213.5;
+    else if (FT1 <= 592.521)
+      tmp1 = 213.6;
+    else if (FT1 <= 592.913)
+      tmp1 = 213.7;
+    else if (FT1 <= 593.304)
+      tmp1 = 213.8;
+    else if (FT1 <= 593.696)
+      tmp1 = 213.9;
+    else if (FT1 <= 594.088)
+      tmp1 = 214;
+  } else if (FT1 <= 597.619) {
+    if (FT1 == 594.088)
+      tmp1 = 214;
+    else if (FT1 <= 594.48)
+      tmp1 = 214.1;
+    else if (FT1 <= 594.872)
+      tmp1 = 214.2;
+    else if (FT1 <= 595.264)
+      tmp1 = 214.3;
+    else if (FT1 <= 595.656)
+      tmp1 = 214.4;
+    else if (FT1 <= 596.048)
+      tmp1 = 214.5;
+    else if (FT1 <= 596.441)
+      tmp1 = 214.6;
+    else if (FT1 <= 596.833)
+      tmp1 = 214.7;
+    else if (FT1 <= 597.226)
+      tmp1 = 214.8;
+    else if (FT1 <= 597.619)
+      tmp1 = 214.9;
+    else if (FT1 <= 598.012)
+      tmp1 = 215;
+  } else if (FT1 <= 601.553) {
+    if (FT1 == 598.012)
+      tmp1 = 215;
+    else if (FT1 <= 598.405)
+      tmp1 = 215.1;
+    else if (FT1 <= 598.798)
+      tmp1 = 215.2;
+    else if (FT1 <= 599.191)
+      tmp1 = 215.3;
+    else if (FT1 <= 599.584)
+      tmp1 = 215.4;
+    else if (FT1 <= 599.978)
+      tmp1 = 215.5;
+    else if (FT1 <= 600.371)
+      tmp1 = 215.6;
+    else if (FT1 <= 600.765)
+      tmp1 = 215.7;
+    else if (FT1 <= 601.159)
+      tmp1 = 215.8;
+    else if (FT1 <= 601.553)
+      tmp1 = 215.9;
+    else if (FT1 <= 601.947)
+      tmp1 = 216;
+  } else if (FT1 <= 605.498) {
+    if (FT1 == 601.947)
+      tmp1 = 216;
+    else if (FT1 <= 602.341)
+      tmp1 = 216.1;
+    else if (FT1 <= 602.735)
+      tmp1 = 216.2;
+    else if (FT1 <= 603.129)
+      tmp1 = 216.3;
+    else if (FT1 <= 603.524)
+      tmp1 = 216.4;
+    else if (FT1 <= 603.918)
+      tmp1 = 216.5;
+    else if (FT1 <= 604.313)
+      tmp1 = 216.6;
+    else if (FT1 <= 604.708)
+      tmp1 = 216.7;
+    else if (FT1 <= 605.103)
+      tmp1 = 216.8;
+    else if (FT1 <= 605.498)
+      tmp1 = 216.9;
+    else if (FT1 <= 605.893)
+      tmp1 = 217;
+  } else if (FT1 <= 609.454) {
+    if (FT1 == 605.893)
+      tmp1 = 217;
+    else if (FT1 <= 606.288)
+      tmp1 = 217.1;
+    else if (FT1 <= 606.684)
+      tmp1 = 217.2;
+    else if (FT1 <= 607.079)
+      tmp1 = 217.3;
+    else if (FT1 <= 607.475)
+      tmp1 = 217.4;
+    else if (FT1 <= 607.87)
+      tmp1 = 217.5;
+    else if (FT1 <= 608.266)
+      tmp1 = 217.6;
+    else if (FT1 <= 608.662)
+      tmp1 = 217.7;
+    else if (FT1 <= 609.058)
+      tmp1 = 217.8;
+    else if (FT1 <= 609.454)
+      tmp1 = 217.9;
+    else if (FT1 <= 609.85)
+      tmp1 = 218;
+  } else if (FT1 <= 613.421) {
+    if (FT1 == 609.85)
+      tmp1 = 218;
+    else if (FT1 <= 610.247)
+      tmp1 = 218.1;
+    else if (FT1 <= 610.643)
+      tmp1 = 218.2;
+    else if (FT1 <= 611.04)
+      tmp1 = 218.3;
+    else if (FT1 <= 611.436)
+      tmp1 = 218.4;
+    else if (FT1 <= 611.833)
+      tmp1 = 218.5;
+    else if (FT1 <= 612.23)
+      tmp1 = 218.6;
+    else if (FT1 <= 612.627)
+      tmp1 = 218.7;
+    else if (FT1 <= 613.024)
+      tmp1 = 218.8;
+    else if (FT1 <= 613.421)
+      tmp1 = 218.9;
+    else if (FT1 <= 613.819)
+      tmp1 = 219;
+  } else if (FT1 <= 617.4) {
+    if (FT1 == 613.819)
+      tmp1 = 219;
+    else if (FT1 <= 614.216)
+      tmp1 = 219.1;
+    else if (FT1 <= 614.614)
+      tmp1 = 219.2;
+    else if (FT1 <= 615.011)
+      tmp1 = 219.3;
+    else if (FT1 <= 615.409)
+      tmp1 = 219.4;
+    else if (FT1 <= 615.807)
+      tmp1 = 219.5;
+    else if (FT1 <= 616.205)
+      tmp1 = 219.6;
+    else if (FT1 <= 616.603)
+      tmp1 = 219.7;
+    else if (FT1 <= 617.001)
+      tmp1 = 219.8;
+    else if (FT1 <= 617.4)
+      tmp1 = 219.9;
+    else if (FT1 <= 617.798)
+      tmp1 = 220;
+  } else if (FT1 <= 621.389) {
+    if (FT1 == 617.798)
+      tmp1 = 220;
+    else if (FT1 <= 618.197)
+      tmp1 = 220.1;
+    else if (FT1 <= 618.595)
+      tmp1 = 220.2;
+    else if (FT1 <= 618.994)
+      tmp1 = 220.3;
+    else if (FT1 <= 619.393)
+      tmp1 = 220.4;
+    else if (FT1 <= 619.792)
+      tmp1 = 220.5;
+    else if (FT1 <= 620.191)
+      tmp1 = 220.6;
+    else if (FT1 <= 620.59)
+      tmp1 = 220.7;
+    else if (FT1 <= 620.989)
+      tmp1 = 220.8;
+    else if (FT1 <= 621.389)
+      tmp1 = 220.9;
+    else if (FT1 <= 621.788)
+      tmp1 = 221;
+  } else if (FT1 <= 625.389) {
+    if (FT1 == 621.788)
+      tmp1 = 221;
+    else if (FT1 <= 622.188)
+      tmp1 = 221.1;
+    else if (FT1 <= 622.588)
+      tmp1 = 221.2;
+    else if (FT1 <= 622.988)
+      tmp1 = 221.3;
+    else if (FT1 <= 623.388)
+      tmp1 = 221.4;
+    else if (FT1 <= 623.788)
+      tmp1 = 221.5;
+    else if (FT1 <= 624.188)
+      tmp1 = 221.6;
+    else if (FT1 <= 624.588)
+      tmp1 = 221.7;
+    else if (FT1 <= 624.989)
+      tmp1 = 221.8;
+    else if (FT1 <= 625.389)
+      tmp1 = 221.9;
+    else if (FT1 <= 625.79)
+      tmp1 = 222;
+  } else if (FT1 <= 629.4) {
+    if (FT1 == 625.79)
+      tmp1 = 222;
+    else if (FT1 <= 626.19)
+      tmp1 = 222.1;
+    else if (FT1 <= 626.591)
+      tmp1 = 222.2;
+    else if (FT1 <= 626.992)
+      tmp1 = 222.3;
+    else if (FT1 <= 627.393)
+      tmp1 = 222.4;
+    else if (FT1 <= 627.795)
+      tmp1 = 222.5;
+    else if (FT1 <= 628.196)
+      tmp1 = 222.6;
+    else if (FT1 <= 628.597)
+      tmp1 = 222.7;
+    else if (FT1 <= 628.999)
+      tmp1 = 222.8;
+    else if (FT1 <= 629.4)
+      tmp1 = 222.9;
+    else if (FT1 <= 629.802)
+      tmp1 = 223;
+  } else if (FT1 <= 633.423) {
+    if (FT1 == 629.802)
+      tmp1 = 223;
+    else if (FT1 <= 630.204)
+      tmp1 = 223.1;
+    else if (FT1 <= 630.606)
+      tmp1 = 223.2;
+    else if (FT1 <= 631.008)
+      tmp1 = 223.3;
+    else if (FT1 <= 631.41)
+      tmp1 = 223.4;
+    else if (FT1 <= 631.812)
+      tmp1 = 223.5;
+    else if (FT1 <= 632.215)
+      tmp1 = 223.6;
+    else if (FT1 <= 632.617)
+      tmp1 = 223.7;
+    else if (FT1 <= 633.02)
+      tmp1 = 223.8;
+    else if (FT1 <= 633.423)
+      tmp1 = 223.9;
+    else if (FT1 <= 633.825)
+      tmp1 = 224;
+  } else if (FT1 <= 637.456) {
+    if (FT1 == 633.825)
+      tmp1 = 224;
+    else if (FT1 <= 634.228)
+      tmp1 = 224.1;
+    else if (FT1 <= 634.631)
+      tmp1 = 224.2;
+    else if (FT1 <= 635.034)
+      tmp1 = 224.3;
+    else if (FT1 <= 635.438)
+      tmp1 = 224.4;
+    else if (FT1 <= 635.841)
+      tmp1 = 224.5;
+    else if (FT1 <= 636.245)
+      tmp1 = 224.6;
+    else if (FT1 <= 636.648)
+      tmp1 = 224.7;
+    else if (FT1 <= 637.052)
+      tmp1 = 224.8;
+    else if (FT1 <= 637.456)
+      tmp1 = 224.9;
+    else if (FT1 <= 637.859)
+      tmp1 = 225;
+  } else if (FT1 <= 641.5) {
+    if (FT1 == 637.859)
+      tmp1 = 225;
+    else if (FT1 <= 638.264)
+      tmp1 = 225.1;
+    else if (FT1 <= 638.668)
+      tmp1 = 225.2;
+    else if (FT1 <= 639.072)
+      tmp1 = 225.3;
+    else if (FT1 <= 639.476)
+      tmp1 = 225.4;
+    else if (FT1 <= 639.881)
+      tmp1 = 225.5;
+    else if (FT1 <= 640.285)
+      tmp1 = 225.6;
+    else if (FT1 <= 640.69)
+      tmp1 = 225.7;
+    else if (FT1 <= 641.095)
+      tmp1 = 225.8;
+    else if (FT1 <= 641.5)
+      tmp1 = 225.9;
+    else if (FT1 <= 641.905)
+      tmp1 = 226;
+  } else if (FT1 <= 645.554) {
+    if (FT1 == 641.905)
+      tmp1 = 226;
+    else if (FT1 <= 642.31)
+      tmp1 = 226.1;
+    else if (FT1 <= 642.715)
+      tmp1 = 226.2;
+    else if (FT1 <= 643.12)
+      tmp1 = 226.3;
+    else if (FT1 <= 643.526)
+      tmp1 = 226.4;
+    else if (FT1 <= 643.931)
+      tmp1 = 226.5;
+    else if (FT1 <= 644.337)
+      tmp1 = 226.6;
+    else if (FT1 <= 644.742)
+      tmp1 = 226.7;
+    else if (FT1 <= 645.148)
+      tmp1 = 226.8;
+    else if (FT1 <= 645.554)
+      tmp1 = 226.9;
+    else if (FT1 <= 645.96)
+      tmp1 = 227;
+  } else if (FT1 <= 649.62) {
+    if (FT1 == 645.96)
+      tmp1 = 227;
+    else if (FT1 <= 646.367)
+      tmp1 = 227.1;
+    else if (FT1 <= 646.773)
+      tmp1 = 227.2;
+    else if (FT1 <= 647.179)
+      tmp1 = 227.3;
+    else if (FT1 <= 647.586)
+      tmp1 = 227.4;
+    else if (FT1 <= 647.992)
+      tmp1 = 227.5;
+    else if (FT1 <= 648.399)
+      tmp1 = 227.6;
+    else if (FT1 <= 648.806)
+      tmp1 = 227.7;
+    else if (FT1 <= 649.213)
+      tmp1 = 227.8;
+    else if (FT1 <= 649.62)
+      tmp1 = 227.9;
+    else if (FT1 <= 650.027)
+      tmp1 = 228;
+  } else if (FT1 <= 653.696) {
+    if (FT1 == 650.027)
+      tmp1 = 228;
+    else if (FT1 <= 650.434)
+      tmp1 = 228.1;
+    else if (FT1 <= 650.842)
+      tmp1 = 228.2;
+    else if (FT1 <= 651.249)
+      tmp1 = 228.3;
+    else if (FT1 <= 651.657)
+      tmp1 = 228.4;
+    else if (FT1 <= 652.064)
+      tmp1 = 228.5;
+    else if (FT1 <= 652.472)
+      tmp1 = 228.6;
+    else if (FT1 <= 652.88)
+      tmp1 = 228.7;
+    else if (FT1 <= 653.288)
+      tmp1 = 228.8;
+    else if (FT1 <= 653.696)
+      tmp1 = 228.9;
+    else if (FT1 <= 654.104)
+      tmp1 = 229;
+  } else if (FT1 <= 657.783) {
+    if (FT1 == 654.104)
+      tmp1 = 229;
+    else if (FT1 <= 654.513)
+      tmp1 = 229.1;
+    else if (FT1 <= 654.921)
+      tmp1 = 229.2;
+    else if (FT1 <= 655.33)
+      tmp1 = 229.3;
+    else if (FT1 <= 655.738)
+      tmp1 = 229.4;
+    else if (FT1 <= 656.147)
+      tmp1 = 229.5;
+    else if (FT1 <= 656.556)
+      tmp1 = 229.6;
+    else if (FT1 <= 656.965)
+      tmp1 = 229.7;
+    else if (FT1 <= 657.374)
+      tmp1 = 229.8;
+    else if (FT1 <= 657.783)
+      tmp1 = 229.9;
+    else if (FT1 <= 658.193)
+      tmp1 = 230;
+  } else if (FT1 <= 661.881) {
+    if (FT1 == 658.193)
+      tmp1 = 230;
+    else if (FT1 <= 658.602)
+      tmp1 = 230.1;
+    else if (FT1 <= 659.011)
+      tmp1 = 230.2;
+    else if (FT1 <= 659.421)
+      tmp1 = 230.3;
+    else if (FT1 <= 659.831)
+      tmp1 = 230.4;
+    else if (FT1 <= 660.241)
+      tmp1 = 230.5;
+    else if (FT1 <= 660.651)
+      tmp1 = 230.6;
+    else if (FT1 <= 661.061)
+      tmp1 = 230.7;
+    else if (FT1 <= 661.471)
+      tmp1 = 230.8;
+    else if (FT1 <= 661.881)
+      tmp1 = 230.9;
+    else if (FT1 <= 662.291)
+      tmp1 = 231;
+  } else if (FT1 <= 665.99) {
+    if (FT1 == 662.291)
+      tmp1 = 231;
+    else if (FT1 <= 662.702)
+      tmp1 = 231.1;
+    else if (FT1 <= 663.113)
+      tmp1 = 231.2;
+    else if (FT1 <= 663.523)
+      tmp1 = 231.3;
+    else if (FT1 <= 663.934)
+      tmp1 = 231.4;
+    else if (FT1 <= 664.345)
+      tmp1 = 231.5;
+    else if (FT1 <= 664.756)
+      tmp1 = 231.6;
+    else if (FT1 <= 665.167)
+      tmp1 = 231.7;
+    else if (FT1 <= 665.578)
+      tmp1 = 231.8;
+    else if (FT1 <= 665.99)
+      tmp1 = 231.9;
+    else if (FT1 <= 666.401)
+      tmp1 = 232;
+  } else if (FT1 <= 670.109) {
+    if (FT1 == 666.401)
+      tmp1 = 232;
+    else if (FT1 <= 666.813)
+      tmp1 = 232.1;
+    else if (FT1 <= 667.224)
+      tmp1 = 232.2;
+    else if (FT1 <= 667.636)
+      tmp1 = 232.3;
+    else if (FT1 <= 668.048)
+      tmp1 = 232.4;
+    else if (FT1 <= 668.46)
+      tmp1 = 232.5;
+    else if (FT1 <= 668.872)
+      tmp1 = 232.6;
+    else if (FT1 <= 669.284)
+      tmp1 = 232.7;
+    else if (FT1 <= 669.696)
+      tmp1 = 232.8;
+    else if (FT1 <= 670.109)
+      tmp1 = 232.9;
+    else if (FT1 <= 670.521)
+      tmp1 = 233;
+  } else if (FT1 <= 674.239) {
+    if (FT1 == 670.521)
+      tmp1 = 233;
+    else if (FT1 <= 670.934)
+      tmp1 = 233.1;
+    else if (FT1 <= 671.347)
+      tmp1 = 233.2;
+    else if (FT1 <= 671.759)
+      tmp1 = 233.3;
+    else if (FT1 <= 672.172)
+      tmp1 = 233.4;
+    else if (FT1 <= 672.585)
+      tmp1 = 233.5;
+    else if (FT1 <= 672.998)
+      tmp1 = 233.6;
+    else if (FT1 <= 673.412)
+      tmp1 = 233.7;
+    else if (FT1 <= 673.825)
+      tmp1 = 233.8;
+    else if (FT1 <= 674.239)
+      tmp1 = 233.9;
+    else if (FT1 <= 674.652)
+      tmp1 = 234;
+  } else if (FT1 <= 678.379) {
+    if (FT1 == 674.652)
+      tmp1 = 234;
+    else if (FT1 <= 675.066)
+      tmp1 = 234.1;
+    else if (FT1 <= 675.48)
+      tmp1 = 234.2;
+    else if (FT1 <= 675.893)
+      tmp1 = 234.3;
+    else if (FT1 <= 676.307)
+      tmp1 = 234.4;
+    else if (FT1 <= 676.721)
+      tmp1 = 234.5;
+    else if (FT1 <= 677.136)
+      tmp1 = 234.6;
+    else if (FT1 <= 677.55)
+      tmp1 = 234.7;
+    else if (FT1 <= 677.964)
+      tmp1 = 234.8;
+    else if (FT1 <= 678.379)
+      tmp1 = 234.9;
+    else if (FT1 <= 678.793)
+      tmp1 = 235;
+  } else if (FT1 <= 682.53) {
+    if (FT1 == 678.793)
+      tmp1 = 235;
+    else if (FT1 <= 679.208)
+      tmp1 = 235.1;
+    else if (FT1 <= 679.623)
+      tmp1 = 235.2;
+    else if (FT1 <= 680.038)
+      tmp1 = 235.3;
+    else if (FT1 <= 680.453)
+      tmp1 = 235.4;
+    else if (FT1 <= 680.868)
+      tmp1 = 235.5;
+    else if (FT1 <= 681.283)
+      tmp1 = 235.6;
+    else if (FT1 <= 681.699)
+      tmp1 = 235.7;
+    else if (FT1 <= 682.114)
+      tmp1 = 235.8;
+    else if (FT1 <= 682.53)
+      tmp1 = 235.9;
+    else if (FT1 <= 682.945)
+      tmp1 = 236;
+  } else if (FT1 <= 686.691) {
+    if (FT1 == 682.945)
+      tmp1 = 236;
+    else if (FT1 <= 683.361)
+      tmp1 = 236.1;
+    else if (FT1 <= 683.777)
+      tmp1 = 236.2;
+    else if (FT1 <= 684.193)
+      tmp1 = 236.3;
+    else if (FT1 <= 684.609)
+      tmp1 = 236.4;
+    else if (FT1 <= 685.025)
+      tmp1 = 236.5;
+    else if (FT1 <= 685.442)
+      tmp1 = 236.6;
+    else if (FT1 <= 685.858)
+      tmp1 = 236.7;
+    else if (FT1 <= 686.275)
+      tmp1 = 236.8;
+    else if (FT1 <= 686.691)
+      tmp1 = 236.9;
+    else if (FT1 <= 687.108)
+      tmp1 = 237;
+  } else if (FT1 <= 690.863) {
+    if (FT1 == 687.108)
+      tmp1 = 237;
+    else if (FT1 <= 687.525)
+      tmp1 = 237.1;
+    else if (FT1 <= 687.942)
+      tmp1 = 237.2;
+    else if (FT1 <= 688.359)
+      tmp1 = 237.3;
+    else if (FT1 <= 688.776)
+      tmp1 = 237.4;
+    else if (FT1 <= 689.193)
+      tmp1 = 237.5;
+    else if (FT1 <= 689.611)
+      tmp1 = 237.6;
+    else if (FT1 <= 690.028)
+      tmp1 = 237.7;
+    else if (FT1 <= 690.446)
+      tmp1 = 237.8;
+    else if (FT1 <= 690.863)
+      tmp1 = 237.9;
+    else if (FT1 <= 691.281)
+      tmp1 = 238;
+  } else if (FT1 <= 695.046) {
+    if (FT1 == 691.281)
+      tmp1 = 238;
+    else if (FT1 <= 691.699)
+      tmp1 = 238.1;
+    else if (FT1 <= 692.117)
+      tmp1 = 238.2;
+    else if (FT1 <= 692.535)
+      tmp1 = 238.3;
+    else if (FT1 <= 692.953)
+      tmp1 = 238.4;
+    else if (FT1 <= 693.372)
+      tmp1 = 238.5;
+    else if (FT1 <= 693.79)
+      tmp1 = 238.6;
+    else if (FT1 <= 694.208)
+      tmp1 = 238.7;
+    else if (FT1 <= 694.627)
+      tmp1 = 238.8;
+    else if (FT1 <= 695.046)
+      tmp1 = 238.9;
+    else if (FT1 <= 695.465)
+      tmp1 = 239;
+  } else if (FT1 <= 699.239) {
+    if (FT1 == 695.465)
+      tmp1 = 239;
+    else if (FT1 <= 695.884)
+      tmp1 = 239.1;
+    else if (FT1 <= 696.303)
+      tmp1 = 239.2;
+    else if (FT1 <= 696.722)
+      tmp1 = 239.3;
+    else if (FT1 <= 697.141)
+      tmp1 = 239.4;
+    else if (FT1 <= 697.56)
+      tmp1 = 239.5;
+    else if (FT1 <= 697.98)
+      tmp1 = 239.6;
+    else if (FT1 <= 698.399)
+      tmp1 = 239.7;
+    else if (FT1 <= 698.819)
+      tmp1 = 239.8;
+    else if (FT1 <= 699.239)
+      tmp1 = 239.9;
+    else if (FT1 <= 699.659)
+      tmp1 = 240;
+  } else if (FT1 <= 703.442) {
+    if (FT1 == 699.659)
+      tmp1 = 240;
+    else if (FT1 <= 700.079)
+      tmp1 = 240.1;
+    else if (FT1 <= 700.499)
+      tmp1 = 240.2;
+    else if (FT1 <= 700.919)
+      tmp1 = 240.3;
+    else if (FT1 <= 701.339)
+      tmp1 = 240.4;
+    else if (FT1 <= 701.759)
+      tmp1 = 240.5;
+    else if (FT1 <= 702.18)
+      tmp1 = 240.6;
+    else if (FT1 <= 702.601)
+      tmp1 = 240.7;
+    else if (FT1 <= 703.021)
+      tmp1 = 240.8;
+    else if (FT1 <= 703.442)
+      tmp1 = 240.9;
+    else if (FT1 <= 703.863)
+      tmp1 = 241;
+  } else if (FT1 <= 707.656) {
+    if (FT1 == 703.863)
+      tmp1 = 241;
+    else if (FT1 <= 704.284)
+      tmp1 = 241.1;
+    else if (FT1 <= 704.705)
+      tmp1 = 241.2;
+    else if (FT1 <= 705.126)
+      tmp1 = 241.3;
+    else if (FT1 <= 705.548)
+      tmp1 = 241.4;
+    else if (FT1 <= 705.969)
+      tmp1 = 241.5;
+    else if (FT1 <= 706.391)
+      tmp1 = 241.6;
+    else if (FT1 <= 706.812)
+      tmp1 = 241.7;
+    else if (FT1 <= 707.234)
+      tmp1 = 241.8;
+    else if (FT1 <= 707.656)
+      tmp1 = 241.9;
+    else if (FT1 <= 708.078)
+      tmp1 = 242;
+  } else if (FT1 <= 711.88) {
+    if (FT1 == 708.078)
+      tmp1 = 242;
+    else if (FT1 <= 708.5)
+      tmp1 = 242.1;
+    else if (FT1 <= 708.922)
+      tmp1 = 242.2;
+    else if (FT1 <= 709.344)
+      tmp1 = 242.3;
+    else if (FT1 <= 709.766)
+      tmp1 = 242.4;
+    else if (FT1 <= 710.189)
+      tmp1 = 242.5;
+    else if (FT1 <= 710.612)
+      tmp1 = 242.6;
+    else if (FT1 <= 711.034)
+      tmp1 = 242.7;
+    else if (FT1 <= 711.457)
+      tmp1 = 242.8;
+    else if (FT1 <= 711.88)
+      tmp1 = 242.9;
+    else if (FT1 <= 712.303)
+      tmp1 = 243;
+  } else if (FT1 <= 716.114) {
+    if (FT1 == 712.303)
+      tmp1 = 243;
+    else if (FT1 <= 712.726)
+      tmp1 = 243.1;
+    else if (FT1 <= 713.149)
+      tmp1 = 243.2;
+    else if (FT1 <= 713.572)
+      tmp1 = 243.3;
+    else if (FT1 <= 713.996)
+      tmp1 = 243.4;
+    else if (FT1 <= 714.419)
+      tmp1 = 243.5;
+    else if (FT1 <= 714.843)
+      tmp1 = 243.6;
+    else if (FT1 <= 715.267)
+      tmp1 = 243.7;
+    else if (FT1 <= 715.69)
+      tmp1 = 243.8;
+    else if (FT1 <= 716.114)
+      tmp1 = 243.9;
+    else if (FT1 <= 716.538)
+      tmp1 = 244;
+  } else if (FT1 <= 720.359) {
+    if (FT1 == 716.538)
+      tmp1 = 244;
+    else if (FT1 <= 716.962)
+      tmp1 = 244.1;
+    else if (FT1 <= 717.387)
+      tmp1 = 244.2;
+    else if (FT1 <= 717.811)
+      tmp1 = 244.3;
+    else if (FT1 <= 718.235)
+      tmp1 = 244.4;
+    else if (FT1 <= 718.66)
+      tmp1 = 244.5;
+    else if (FT1 <= 719.084)
+      tmp1 = 244.6;
+    else if (FT1 <= 719.509)
+      tmp1 = 244.7;
+    else if (FT1 <= 719.934)
+      tmp1 = 244.8;
+    else if (FT1 <= 720.359)
+      tmp1 = 244.9;
+    else if (FT1 <= 720.784)
+      tmp1 = 245;
+  } else if (FT1 <= 724.614) {
+    if (FT1 == 720.784)
+      tmp1 = 245;
+    else if (FT1 <= 721.209)
+      tmp1 = 245.1;
+    else if (FT1 <= 721.634)
+      tmp1 = 245.2;
+    else if (FT1 <= 722.06)
+      tmp1 = 245.3;
+    else if (FT1 <= 722.485)
+      tmp1 = 245.4;
+    else if (FT1 <= 722.911)
+      tmp1 = 245.5;
+    else if (FT1 <= 723.336)
+      tmp1 = 245.6;
+    else if (FT1 <= 723.762)
+      tmp1 = 245.7;
+    else if (FT1 <= 724.188)
+      tmp1 = 245.8;
+    else if (FT1 <= 724.614)
+      tmp1 = 245.9;
+    else if (FT1 <= 725.04)
+      tmp1 = 246;
+  } else if (FT1 <= 728.879) {
+    if (FT1 == 725.04)
+      tmp1 = 246;
+    else if (FT1 <= 725.466)
+      tmp1 = 246.1;
+    else if (FT1 <= 725.892)
+      tmp1 = 246.2;
+    else if (FT1 <= 726.319)
+      tmp1 = 246.3;
+    else if (FT1 <= 726.745)
+      tmp1 = 246.4;
+    else if (FT1 <= 727.172)
+      tmp1 = 246.5;
+    else if (FT1 <= 727.599)
+      tmp1 = 246.6;
+    else if (FT1 <= 728.025)
+      tmp1 = 246.7;
+    else if (FT1 <= 728.452)
+      tmp1 = 246.8;
+    else if (FT1 <= 728.879)
+      tmp1 = 246.9;
+    else if (FT1 <= 729.306)
+      tmp1 = 247;
+  } else if (FT1 <= 733.155) {
+    if (FT1 == 729.306)
+      tmp1 = 247;
+    else if (FT1 <= 729.734)
+      tmp1 = 247.1;
+    else if (FT1 <= 730.161)
+      tmp1 = 247.2;
+    else if (FT1 <= 730.588)
+      tmp1 = 247.3;
+    else if (FT1 <= 731.016)
+      tmp1 = 247.4;
+    else if (FT1 <= 731.443)
+      tmp1 = 247.5;
+    else if (FT1 <= 731.871)
+      tmp1 = 247.6;
+    else if (FT1 <= 732.299)
+      tmp1 = 247.7;
+    else if (FT1 <= 732.727)
+      tmp1 = 247.8;
+    else if (FT1 <= 733.155)
+      tmp1 = 247.9;
+    else if (FT1 <= 733.583)
+      tmp1 = 248;
+  } else if (FT1 <= 737.44) {
+    if (FT1 == 733.583)
+      tmp1 = 248;
+    else if (FT1 <= 734.011)
+      tmp1 = 248.1;
+    else if (FT1 <= 734.439)
+      tmp1 = 248.2;
+    else if (FT1 <= 734.868)
+      tmp1 = 248.3;
+    else if (FT1 <= 735.296)
+      tmp1 = 248.4;
+    else if (FT1 <= 735.725)
+      tmp1 = 248.5;
+    else if (FT1 <= 736.154)
+      tmp1 = 248.6;
+    else if (FT1 <= 736.582)
+      tmp1 = 248.7;
+    else if (FT1 <= 737.011)
+      tmp1 = 248.8;
+    else if (FT1 <= 737.44)
+      tmp1 = 248.9;
+    else if (FT1 <= 737.869)
+      tmp1 = 249;
+  } else if (FT1 <= 741.736) {
+    if (FT1 == 737.869)
+      tmp1 = 249;
+    else if (FT1 <= 738.299)
+      tmp1 = 249.1;
+    else if (FT1 <= 738.728)
+      tmp1 = 249.2;
+    else if (FT1 <= 739.157)
+      tmp1 = 249.3;
+    else if (FT1 <= 739.587)
+      tmp1 = 249.4;
+    else if (FT1 <= 740.017)
+      tmp1 = 249.5;
+    else if (FT1 <= 740.446)
+      tmp1 = 249.6;
+    else if (FT1 <= 740.876)
+      tmp1 = 249.7;
+    else if (FT1 <= 741.306)
+      tmp1 = 249.8;
+    else if (FT1 <= 741.736)
+      tmp1 = 249.9;
+    else if (FT1 <= 742.166)
+      tmp1 = 250;
+  } else if (FT1 <= 746.042) {
+    if (FT1 == 742.166)
+      tmp1 = 250;
+    else if (FT1 <= 742.597)
+      tmp1 = 250.1;
+    else if (FT1 <= 743.027)
+      tmp1 = 250.2;
+    else if (FT1 <= 743.457)
+      tmp1 = 250.3;
+    else if (FT1 <= 743.888)
+      tmp1 = 250.4;
+    else if (FT1 <= 744.318)
+      tmp1 = 250.5;
+    else if (FT1 <= 744.749)
+      tmp1 = 250.6;
+    else if (FT1 <= 745.18)
+      tmp1 = 250.7;
+    else if (FT1 <= 745.611)
+      tmp1 = 250.8;
+    else if (FT1 <= 746.042)
+      tmp1 = 250.9;
+    else if (FT1 <= 746.473)
+      tmp1 = 251;
+  } else if (FT1 <= 750.358) {
+    if (FT1 == 746.473)
+      tmp1 = 251;
+    else if (FT1 <= 746.904)
+      tmp1 = 251.1;
+    else if (FT1 <= 747.336)
+      tmp1 = 251.2;
+    else if (FT1 <= 747.767)
+      tmp1 = 251.3;
+    else if (FT1 <= 748.199)
+      tmp1 = 251.4;
+    else if (FT1 <= 748.63)
+      tmp1 = 251.5;
+    else if (FT1 <= 749.062)
+      tmp1 = 251.6;
+    else if (FT1 <= 749.494)
+      tmp1 = 251.7;
+    else if (FT1 <= 749.926)
+      tmp1 = 251.8;
+    else if (FT1 <= 750.358)
+      tmp1 = 251.9;
+    else if (FT1 <= 750.79)
+      tmp1 = 252;
+  } else if (FT1 <= 754.684) {
+    if (FT1 == 750.79)
+      tmp1 = 252;
+    else if (FT1 <= 751.223)
+      tmp1 = 252.1;
+    else if (FT1 <= 751.655)
+      tmp1 = 252.2;
+    else if (FT1 <= 752.087)
+      tmp1 = 252.3;
+    else if (FT1 <= 752.52)
+      tmp1 = 252.4;
+    else if (FT1 <= 752.953)
+      tmp1 = 252.5;
+    else if (FT1 <= 753.385)
+      tmp1 = 252.6;
+    else if (FT1 <= 753.818)
+      tmp1 = 252.7;
+    else if (FT1 <= 754.251)
+      tmp1 = 252.8;
+    else if (FT1 <= 754.684)
+      tmp1 = 252.9;
+    else if (FT1 <= 755.117)
+      tmp1 = 253;
+  } else if (FT1 <= 759.02) {
+    if (FT1 == 755.117)
+      tmp1 = 253;
+    else if (FT1 <= 755.551)
+      tmp1 = 253.1;
+    else if (FT1 <= 755.984)
+      tmp1 = 253.2;
+    else if (FT1 <= 756.417)
+      tmp1 = 253.3;
+    else if (FT1 <= 756.851)
+      tmp1 = 253.4;
+    else if (FT1 <= 757.285)
+      tmp1 = 253.5;
+    else if (FT1 <= 757.718)
+      tmp1 = 253.6;
+    else if (FT1 <= 758.152)
+      tmp1 = 253.7;
+    else if (FT1 <= 758.586)
+      tmp1 = 253.8;
+    else if (FT1 <= 759.02)
+      tmp1 = 253.9;
+    else if (FT1 <= 759.455)
+      tmp1 = 254;
+  } else if (FT1 <= 763.366) {
+    if (FT1 == 759.455)
+      tmp1 = 254;
+    else if (FT1 <= 759.889)
+      tmp1 = 254.1;
+    else if (FT1 <= 760.323)
+      tmp1 = 254.2;
+    else if (FT1 <= 760.758)
+      tmp1 = 254.3;
+    else if (FT1 <= 761.192)
+      tmp1 = 254.4;
+    else if (FT1 <= 761.627)
+      tmp1 = 254.5;
+    else if (FT1 <= 762.062)
+      tmp1 = 254.6;
+    else if (FT1 <= 762.496)
+      tmp1 = 254.7;
+    else if (FT1 <= 762.931)
+      tmp1 = 254.8;
+    else if (FT1 <= 763.366)
+      tmp1 = 254.9;
+    else if (FT1 <= 763.802)
+      tmp1 = 255;
+  } else if (FT1 <= 767.723) {
+    if (FT1 == 763.802)
+      tmp1 = 255;
+    else if (FT1 <= 764.237)
+      tmp1 = 255.1;
+    else if (FT1 <= 764.672)
+      tmp1 = 255.2;
+    else if (FT1 <= 765.108)
+      tmp1 = 255.3;
+    else if (FT1 <= 765.543)
+      tmp1 = 255.4;
+    else if (FT1 <= 765.979)
+      tmp1 = 255.5;
+    else if (FT1 <= 766.415)
+      tmp1 = 255.6;
+    else if (FT1 <= 766.851)
+      tmp1 = 255.7;
+    else if (FT1 <= 767.287)
+      tmp1 = 255.8;
+    else if (FT1 <= 767.723)
+      tmp1 = 255.9;
+    else if (FT1 <= 768.159)
+      tmp1 = 256;
+  } else if (FT1 <= 772.089) {
+    if (FT1 == 768.159)
+      tmp1 = 256;
+    else if (FT1 <= 768.595)
+      tmp1 = 256.1;
+    else if (FT1 <= 769.031)
+      tmp1 = 256.2;
+    else if (FT1 <= 769.468)
+      tmp1 = 256.3;
+    else if (FT1 <= 769.904)
+      tmp1 = 256.4;
+    else if (FT1 <= 770.341)
+      tmp1 = 256.5;
+    else if (FT1 <= 770.778)
+      tmp1 = 256.6;
+    else if (FT1 <= 771.215)
+      tmp1 = 256.7;
+    else if (FT1 <= 771.652)
+      tmp1 = 256.8;
+    else if (FT1 <= 772.089)
+      tmp1 = 256.9;
+  } else if (FT1 <= 776.465) {
+    if (FT1 == 772.526)
+      tmp1 = 257;
+    else if (FT1 <= 772.963)
+      tmp1 = 257.1;
+    else if (FT1 <= 773.4)
+      tmp1 = 257.2;
+    else if (FT1 <= 773.838)
+      tmp1 = 257.3;
+    else if (FT1 <= 774.275)
+      tmp1 = 257.4;
+    else if (FT1 <= 774.713)
+      tmp1 = 257.5;
+    else if (FT1 <= 775.151)
+      tmp1 = 257.6;
+    else if (FT1 <= 775.589)
+      tmp1 = 257.7;
+    else if (FT1 <= 776.027)
+      tmp1 = 257.8;
+    else if (FT1 <= 776.465)
+      tmp1 = 257.9;
+  } else if (FT1 <= 780.851) {
+    if (FT1 == 776.903)
+      tmp1 = 258;
+    else if (FT1 <= 777.341)
+      tmp1 = 258.1;
+    else if (FT1 <= 777.779)
+      tmp1 = 258.2;
+    else if (FT1 <= 778.218)
+      tmp1 = 258.3;
+    else if (FT1 <= 778.656)
+      tmp1 = 258.4;
+    else if (FT1 <= 779.095)
+      tmp1 = 258.5;
+    else if (FT1 <= 779.534)
+      tmp1 = 258.6;
+    else if (FT1 <= 779.973)
+      tmp1 = 258.7;
+    else if (FT1 <= 780.412)
+      tmp1 = 258.8;
+    else if (FT1 <= 780.851)
+      tmp1 = 258.9;
+  } else if (FT1 <= 785.246) {
+    if (FT1 == 781.29)
+      tmp1 = 259;
+    else if (FT1 <= 781.729)
+      tmp1 = 259.1;
+    else if (FT1 <= 782.168)
+      tmp1 = 259.2;
+    else if (FT1 <= 782.608)
+      tmp1 = 259.3;
+    else if (FT1 <= 783.047)
+      tmp1 = 259.4;
+    else if (FT1 <= 783.487)
+      tmp1 = 259.5;
+    else if (FT1 <= 783.927)
+      tmp1 = 259.6;
+    else if (FT1 <= 784.367)
+      tmp1 = 259.7;
+    else if (FT1 <= 784.806)
+      tmp1 = 259.8;
+    else if (FT1 <= 785.246)
+      tmp1 = 259.9;
+  } else if (FT1 <= 789.652) {
+    if (FT1 == 785.687)
+      tmp1 = 260;
+    else if (FT1 <= 786.127)
+      tmp1 = 260.1;
+    else if (FT1 <= 786.567)
+      tmp1 = 260.2;
+    else if (FT1 <= 787.008)
+      tmp1 = 260.3;
+    else if (FT1 <= 787.448)
+      tmp1 = 260.4;
+    else if (FT1 <= 787.889)
+      tmp1 = 260.5;
+    else if (FT1 <= 788.329)
+      tmp1 = 260.6;
+    else if (FT1 <= 788.77)
+      tmp1 = 260.7;
+    else if (FT1 <= 789.211)
+      tmp1 = 260.8;
+    else if (FT1 <= 789.652)
+      tmp1 = 260.9;
+  } else if (FT1 <= 794.068) {
+    if (FT1 == 790.093)
+      tmp1 = 261;
+    else if (FT1 <= 790.534)
+      tmp1 = 261.1;
+    else if (FT1 <= 790.976)
+      tmp1 = 261.2;
+    else if (FT1 <= 791.417)
+      tmp1 = 261.3;
+    else if (FT1 <= 791.859)
+      tmp1 = 261.4;
+    else if (FT1 <= 792.3)
+      tmp1 = 261.5;
+    else if (FT1 <= 792.742)
+      tmp1 = 261.6;
+    else if (FT1 <= 793.184)
+      tmp1 = 261.7;
+    else if (FT1 <= 793.626)
+      tmp1 = 261.8;
+    else if (FT1 <= 794.068)
+      tmp1 = 261.9;
+  } else if (FT1 <= 798.493) {
+    if (FT1 == 794.51)
+      tmp1 = 262;
+    else if (FT1 <= 794.952)
+      tmp1 = 262.1;
+    else if (FT1 <= 795.394)
+      tmp1 = 262.2;
+    else if (FT1 <= 795.836)
+      tmp1 = 262.3;
+    else if (FT1 <= 796.279)
+      tmp1 = 262.4;
+    else if (FT1 <= 796.721)
+      tmp1 = 262.5;
+    else if (FT1 <= 797.164)
+      tmp1 = 262.6;
+    else if (FT1 <= 797.607)
+      tmp1 = 262.7;
+    else if (FT1 <= 798.05)
+      tmp1 = 262.8;
+    else if (FT1 <= 798.493)
+      tmp1 = 262.9;
+  } else if (FT1 <= 802.928) {
+    if (FT1 == 798.936)
+      tmp1 = 263;
+    else if (FT1 <= 799.379)
+      tmp1 = 263.1;
+    else if (FT1 <= 799.822)
+      tmp1 = 263.2;
+    else if (FT1 <= 800.266)
+      tmp1 = 263.3;
+    else if (FT1 <= 800.709)
+      tmp1 = 263.4;
+    else if (FT1 <= 801.153)
+      tmp1 = 263.5;
+    else if (FT1 <= 801.596)
+      tmp1 = 263.6;
+    else if (FT1 <= 802.04)
+      tmp1 = 263.7;
+    else if (FT1 <= 802.484)
+      tmp1 = 263.8;
+    else if (FT1 <= 802.928)
+      tmp1 = 263.9;
+  } else if (FT1 <= 807.372) {
+    if (FT1 == 803.372)
+      tmp1 = 264;
+    else if (FT1 <= 803.816)
+      tmp1 = 264.1;
+    else if (FT1 <= 804.26)
+      tmp1 = 264.2;
+    else if (FT1 <= 804.704)
+      tmp1 = 264.3;
+    else if (FT1 <= 805.149)
+      tmp1 = 264.4;
+    else if (FT1 <= 805.593)
+      tmp1 = 264.5;
+    else if (FT1 <= 806.038)
+      tmp1 = 264.6;
+    else if (FT1 <= 806.483)
+      tmp1 = 264.7;
+    else if (FT1 <= 806.928)
+      tmp1 = 264.8;
+    else if (FT1 <= 807.372)
+      tmp1 = 264.9;
+  } else if (FT1 <= 811.827) {
+    if (FT1 == 807.817)
+      tmp1 = 265;
+    else if (FT1 <= 808.263)
+      tmp1 = 265.1;
+    else if (FT1 <= 808.708)
+      tmp1 = 265.2;
+    else if (FT1 <= 809.153)
+      tmp1 = 265.3;
+    else if (FT1 <= 809.598)
+      tmp1 = 265.4;
+    else if (FT1 <= 810.044)
+      tmp1 = 265.5;
+    else if (FT1 <= 810.489)
+      tmp1 = 265.6;
+    else if (FT1 <= 810.935)
+      tmp1 = 265.7;
+    else if (FT1 <= 811.381)
+      tmp1 = 265.8;
+    else if (FT1 <= 811.827)
+      tmp1 = 265.9;
+  } else if (FT1 <= 816.291) {
+    if (FT1 == 812.273)
+      tmp1 = 266;
+    else if (FT1 <= 812.719)
+      tmp1 = 266.1;
+    else if (FT1 <= 813.165)
+      tmp1 = 266.2;
+    else if (FT1 <= 813.611)
+      tmp1 = 266.3;
+    else if (FT1 <= 814.058)
+      tmp1 = 266.4;
+    else if (FT1 <= 814.504)
+      tmp1 = 266.5;
+    else if (FT1 <= 814.951)
+      tmp1 = 266.6;
+    else if (FT1 <= 815.397)
+      tmp1 = 266.7;
+    else if (FT1 <= 815.844)
+      tmp1 = 266.8;
+    else if (FT1 <= 816.291)
+      tmp1 = 266.9;
+  } else if (FT1 <= 820.765) {
+    if (FT1 == 816.738)
+      tmp1 = 267;
+    else if (FT1 <= 817.185)
+      tmp1 = 267.1;
+    else if (FT1 <= 817.632)
+      tmp1 = 267.2;
+    else if (FT1 <= 818.079)
+      tmp1 = 267.3;
+    else if (FT1 <= 818.527)
+      tmp1 = 267.4;
+    else if (FT1 <= 818.974)
+      tmp1 = 267.5;
+    else if (FT1 <= 819.421)
+      tmp1 = 267.6;
+    else if (FT1 <= 819.869)
+      tmp1 = 267.7;
+    else if (FT1 <= 820.317)
+      tmp1 = 267.8;
+    else if (FT1 <= 820.765)
+      tmp1 = 267.9;
+  } else if (FT1 <= 825.248) {
+    if (FT1 == 821.212)
+      tmp1 = 268;
+    else if (FT1 <= 821.66)
+      tmp1 = 268.1;
+    else if (FT1 <= 822.109)
+      tmp1 = 268.2;
+    else if (FT1 <= 822.557)
+      tmp1 = 268.3;
+    else if (FT1 <= 823.005)
+      tmp1 = 268.4;
+    else if (FT1 <= 823.453)
+      tmp1 = 268.5;
+    else if (FT1 <= 823.902)
+      tmp1 = 268.6;
+    else if (FT1 <= 824.35)
+      tmp1 = 268.7;
+    else if (FT1 <= 824.799)
+      tmp1 = 268.8;
+    else if (FT1 <= 825.248)
+      tmp1 = 268.9;
+  } else if (FT1 <= 829.741) {
+    if (FT1 == 825.697)
+      tmp1 = 269;
+    else if (FT1 <= 826.146)
+      tmp1 = 269.1;
+    else if (FT1 <= 826.595)
+      tmp1 = 269.2;
+    else if (FT1 <= 827.044)
+      tmp1 = 269.3;
+    else if (FT1 <= 827.493)
+      tmp1 = 269.4;
+    else if (FT1 <= 827.943)
+      tmp1 = 269.5;
+    else if (FT1 <= 828.392)
+      tmp1 = 269.6;
+    else if (FT1 <= 828.841)
+      tmp1 = 269.7;
+    else if (FT1 <= 829.291)
+      tmp1 = 269.8;
+    else if (FT1 <= 829.741)
+      tmp1 = 269.9;
+  } else if (FT1 <= 834.243) {
+    if (FT1 == 830.191)
+      tmp1 = 270;
+    else if (FT1 <= 830.641)
+      tmp1 = 270.1;
+    else if (FT1 <= 831.091)
+      tmp1 = 270.2;
+    else if (FT1 <= 831.541)
+      tmp1 = 270.3;
+    else if (FT1 <= 831.991)
+      tmp1 = 270.4;
+    else if (FT1 <= 832.441)
+      tmp1 = 270.5;
+    else if (FT1 <= 832.892)
+      tmp1 = 270.6;
+    else if (FT1 <= 833.342)
+      tmp1 = 270.7;
+    else if (FT1 <= 833.793)
+      tmp1 = 270.8;
+    else if (FT1 <= 834.243)
+      tmp1 = 270.9;
+  } else if (FT1 <= 838.755) {
+    if (FT1 == 834.694)
+      tmp1 = 271;
+    else if (FT1 <= 835.145)
+      tmp1 = 271.1;
+    else if (FT1 <= 835.596)
+      tmp1 = 271.2;
+    else if (FT1 <= 836.047)
+      tmp1 = 271.3;
+    else if (FT1 <= 836.498)
+      tmp1 = 271.4;
+    else if (FT1 <= 836.949)
+      tmp1 = 271.5;
+    else if (FT1 <= 837.401)
+      tmp1 = 271.6;
+    else if (FT1 <= 837.852)
+      tmp1 = 271.7;
+    else if (FT1 <= 838.304)
+      tmp1 = 271.8;
+    else if (FT1 <= 838.755)
+      tmp1 = 271.9;
+  } else if (FT1 <= 843.277) {
+    if (FT1 == 839.207)
+      tmp1 = 272;
+    else if (FT1 <= 839.659)
+      tmp1 = 272.1;
+    else if (FT1 <= 840.111)
+      tmp1 = 272.2;
+    else if (FT1 <= 840.563)
+      tmp1 = 272.3;
+    else if (FT1 <= 841.015)
+      tmp1 = 272.4;
+    else if (FT1 <= 841.467)
+      tmp1 = 272.5;
+    else if (FT1 <= 841.919)
+      tmp1 = 272.6;
+    else if (FT1 <= 842.372)
+      tmp1 = 272.7;
+    else if (FT1 <= 842.824)
+      tmp1 = 272.8;
+    else if (FT1 <= 843.277)
+      tmp1 = 272.9;
+  } else if (FT1 <= 847.808) {
+    if (FT1 == 843.729)
+      tmp1 = 273;
+    else if (FT1 <= 844.182)
+      tmp1 = 273.1;
+    else if (FT1 <= 844.635)
+      tmp1 = 273.2;
+    else if (FT1 <= 845.088)
+      tmp1 = 273.3;
+    else if (FT1 <= 845.541)
+      tmp1 = 273.4;
+    else if (FT1 <= 845.994)
+      tmp1 = 273.5;
+    else if (FT1 <= 846.447)
+      tmp1 = 273.6;
+    else if (FT1 <= 846.901)
+      tmp1 = 273.7;
+    else if (FT1 <= 847.354)
+      tmp1 = 273.8;
+    else if (FT1 <= 847.808)
+      tmp1 = 273.9;
+  } else if (FT1 <= 852.348) {
+    if (FT1 == 848.261)
+      tmp1 = 274;
+    else if (FT1 <= 848.715)
+      tmp1 = 274.1;
+    else if (FT1 <= 849.169)
+      tmp1 = 274.2;
+    else if (FT1 <= 849.623)
+      tmp1 = 274.3;
+    else if (FT1 <= 850.077)
+      tmp1 = 274.4;
+    else if (FT1 <= 850.531)
+      tmp1 = 274.5;
+    else if (FT1 <= 850.985)
+      tmp1 = 274.6;
+    else if (FT1 <= 851.439)
+      tmp1 = 274.7;
+    else if (FT1 <= 851.894)
+      tmp1 = 274.8;
+    else if (FT1 <= 852.348)
+      tmp1 = 274.9;
+  } else if (FT1 <= 856.898) {
+    if (FT1 == 852.803)
+      tmp1 = 275;
+    else if (FT1 <= 853.257)
+      tmp1 = 275.1;
+    else if (FT1 <= 853.712)
+      tmp1 = 275.2;
+    else if (FT1 <= 854.167)
+      tmp1 = 275.3;
+    else if (FT1 <= 854.622)
+      tmp1 = 275.4;
+    else if (FT1 <= 855.077)
+      tmp1 = 275.5;
+    else if (FT1 <= 855.532)
+      tmp1 = 275.6;
+    else if (FT1 <= 855.987)
+      tmp1 = 275.7;
+    else if (FT1 <= 856.443)
+      tmp1 = 275.8;
+    else if (FT1 <= 856.898)
+      tmp1 = 275.9;
+  } else if (FT1 <= 861.457) {
+    if (FT1 == 857.354)
+      tmp1 = 276;
+    else if (FT1 <= 857.809)
+      tmp1 = 276.1;
+    else if (FT1 <= 858.265)
+      tmp1 = 276.2;
+    else if (FT1 <= 858.721)
+      tmp1 = 276.3;
+    else if (FT1 <= 859.176)
+      tmp1 = 276.4;
+    else if (FT1 <= 859.632)
+      tmp1 = 276.5;
+    else if (FT1 <= 860.088)
+      tmp1 = 276.6;
+    else if (FT1 <= 860.545)
+      tmp1 = 276.7;
+    else if (FT1 <= 861.001)
+      tmp1 = 276.8;
+    else if (FT1 <= 861.457)
+      tmp1 = 276.9;
+  } else if (FT1 <= 866.026) {
+    if (FT1 == 861.914)
+      tmp1 = 277;
+    else if (FT1 <= 862.37)
+      tmp1 = 277.1;
+    else if (FT1 <= 862.827)
+      tmp1 = 277.2;
+    else if (FT1 <= 863.284)
+      tmp1 = 277.3;
+    else if (FT1 <= 863.74)
+      tmp1 = 277.4;
+    else if (FT1 <= 864.197)
+      tmp1 = 277.5;
+    else if (FT1 <= 864.654)
+      tmp1 = 277.6;
+    else if (FT1 <= 865.111)
+      tmp1 = 277.7;
+    else if (FT1 <= 865.569)
+      tmp1 = 277.8;
+    else if (FT1 <= 866.026)
+      tmp1 = 277.9;
+  } else if (FT1 <= 870.604) {
+    if (FT1 == 866.483)
+      tmp1 = 278;
+    else if (FT1 <= 866.941)
+      tmp1 = 278.1;
+    else if (FT1 <= 867.398)
+      tmp1 = 278.2;
+    else if (FT1 <= 867.856)
+      tmp1 = 278.3;
+    else if (FT1 <= 868.314)
+      tmp1 = 278.4;
+    else if (FT1 <= 868.771)
+      tmp1 = 278.5;
+    else if (FT1 <= 869.229)
+      tmp1 = 278.6;
+    else if (FT1 <= 869.687)
+      tmp1 = 278.7;
+    else if (FT1 <= 870.146)
+      tmp1 = 278.8;
+    else if (FT1 <= 870.604)
+      tmp1 = 278.9;
+  } else if (FT1 <= 875.191) {
+    if (FT1 == 871.062)
+      tmp1 = 279;
+    else if (FT1 <= 871.52)
+      tmp1 = 279.1;
+    else if (FT1 <= 871.979)
+      tmp1 = 279.2;
+    else if (FT1 <= 872.438)
+      tmp1 = 279.3;
+    else if (FT1 <= 872.896)
+      tmp1 = 279.4;
+    else if (FT1 <= 873.355)
+      tmp1 = 279.5;
+    else if (FT1 <= 873.814)
+      tmp1 = 279.6;
+    else if (FT1 <= 874.273)
+      tmp1 = 279.7;
+    else if (FT1 <= 874.732)
+      tmp1 = 279.8;
+    else if (FT1 <= 875.191)
+      tmp1 = 279.9;
+  } else if (FT1 <= 879.788) {
+    if (FT1 == 875.65)
+      tmp1 = 280;
+    else if (FT1 <= 876.11)
+      tmp1 = 280.1;
+    else if (FT1 <= 876.569)
+      tmp1 = 280.2;
+    else if (FT1 <= 877.028)
+      tmp1 = 280.3;
+    else if (FT1 <= 877.488)
+      tmp1 = 280.4;
+    else if (FT1 <= 877.948)
+      tmp1 = 280.5;
+    else if (FT1 <= 878.408)
+      tmp1 = 280.6;
+    else if (FT1 <= 878.867)
+      tmp1 = 280.7;
+    else if (FT1 <= 879.327)
+      tmp1 = 280.8;
+    else if (FT1 <= 879.788)
+      tmp1 = 280.9;
+  } else if (FT1 <= 884.393) {
+    if (FT1 == 880.248)
+      tmp1 = 281;
+    else if (FT1 <= 880.708)
+      tmp1 = 281.1;
+    else if (FT1 <= 881.168)
+      tmp1 = 281.2;
+    else if (FT1 <= 881.629)
+      tmp1 = 281.3;
+    else if (FT1 <= 882.089)
+      tmp1 = 281.4;
+    else if (FT1 <= 882.55)
+      tmp1 = 281.5;
+    else if (FT1 <= 883.011)
+      tmp1 = 281.6;
+    else if (FT1 <= 883.471)
+      tmp1 = 281.7;
+    else if (FT1 <= 883.932)
+      tmp1 = 281.8;
+    else if (FT1 <= 884.393)
+      tmp1 = 281.9;
+  } else if (FT1 <= 889.008) {
+    if (FT1 == 884.854)
+      tmp1 = 282;
+    else if (FT1 <= 885.316)
+      tmp1 = 282.1;
+    else if (FT1 <= 885.777)
+      tmp1 = 282.2;
+    else if (FT1 <= 886.238)
+      tmp1 = 282.3;
+    else if (FT1 <= 886.7)
+      tmp1 = 282.4;
+    else if (FT1 <= 887.161)
+      tmp1 = 282.5;
+    else if (FT1 <= 887.623)
+      tmp1 = 282.6;
+    else if (FT1 <= 888.085)
+      tmp1 = 282.7;
+    else if (FT1 <= 888.546)
+      tmp1 = 282.8;
+    else if (FT1 <= 889.008)
+      tmp1 = 282.9;
+  } else if (FT1 <= 893.632) {
+    if (FT1 == 889.47)
+      tmp1 = 283;
+    else if (FT1 <= 889.932)
+      tmp1 = 283.1;
+    else if (FT1 <= 890.395)
+      tmp1 = 283.2;
+    else if (FT1 <= 890.857)
+      tmp1 = 283.3;
+    else if (FT1 <= 891.319)
+      tmp1 = 283.4;
+    else if (FT1 <= 891.782)
+      tmp1 = 283.5;
+    else if (FT1 <= 892.244)
+      tmp1 = 283.6;
+    else if (FT1 <= 892.707)
+      tmp1 = 283.7;
+    else if (FT1 <= 893.17)
+      tmp1 = 283.8;
+    else if (FT1 <= 893.632)
+      tmp1 = 283.9;
+  } else if (FT1 <= 898.266) {
+    if (FT1 == 894.095)
+      tmp1 = 284;
+    else if (FT1 <= 894.558)
+      tmp1 = 284.1;
+    else if (FT1 <= 895.022)
+      tmp1 = 284.2;
+    else if (FT1 <= 895.485)
+      tmp1 = 284.3;
+    else if (FT1 <= 895.948)
+      tmp1 = 284.4;
+    else if (FT1 <= 896.411)
+      tmp1 = 284.5;
+    else if (FT1 <= 896.875)
+      tmp1 = 284.6;
+    else if (FT1 <= 897.338)
+      tmp1 = 284.7;
+    else if (FT1 <= 897.802)
+      tmp1 = 284.8;
+    else if (FT1 <= 898.266)
+      tmp1 = 284.9;
+  } else if (FT1 <= 902.908) {
+    if (FT1 == 898.73)
+      tmp1 = 285;
+    else if (FT1 <= 899.194)
+      tmp1 = 285.1;
+    else if (FT1 <= 899.658)
+      tmp1 = 285.2;
+    else if (FT1 <= 900.122)
+      tmp1 = 285.3;
+    else if (FT1 <= 900.586)
+      tmp1 = 285.4;
+    else if (FT1 <= 901.05)
+      tmp1 = 285.5;
+    else if (FT1 <= 901.515)
+      tmp1 = 285.6;
+    else if (FT1 <= 901.979)
+      tmp1 = 285.7;
+    else if (FT1 <= 902.444)
+      tmp1 = 285.8;
+    else if (FT1 <= 902.908)
+      tmp1 = 285.9;
+  } else if (FT1 <= 907.56) {
+    if (FT1 == 903.373)
+      tmp1 = 286;
+    else if (FT1 <= 903.838)
+      tmp1 = 286.1;
+    else if (FT1 <= 904.303)
+      tmp1 = 286.2;
+    else if (FT1 <= 904.768)
+      tmp1 = 286.3;
+    else if (FT1 <= 905.233)
+      tmp1 = 286.4;
+    else if (FT1 <= 905.698)
+      tmp1 = 286.5;
+    else if (FT1 <= 906.164)
+      tmp1 = 286.6;
+    else if (FT1 <= 906.629)
+      tmp1 = 286.7;
+    else if (FT1 <= 907.094)
+      tmp1 = 286.8;
+    else if (FT1 <= 907.56)
+      tmp1 = 286.9;
+  } else if (FT1 <= 912.221) {
+    if (FT1 == 908.026)
+      tmp1 = 287;
+    else if (FT1 <= 908.491)
+      tmp1 = 287.1;
+    else if (FT1 <= 908.957)
+      tmp1 = 287.2;
+    else if (FT1 <= 909.423)
+      tmp1 = 287.3;
+    else if (FT1 <= 909.889)
+      tmp1 = 287.4;
+    else if (FT1 <= 910.355)
+      tmp1 = 287.5;
+    else if (FT1 <= 910.822)
+      tmp1 = 287.6;
+    else if (FT1 <= 911.288)
+      tmp1 = 287.7;
+    else if (FT1 <= 911.754)
+      tmp1 = 287.8;
+    else if (FT1 <= 912.221)
+      tmp1 = 287.9;
+  } else if (FT1 <= 916.89) {
+    if (FT1 == 912.687)
+      tmp1 = 288;
+    else if (FT1 <= 913.154)
+      tmp1 = 288.1;
+    else if (FT1 <= 913.621)
+      tmp1 = 288.2;
+    else if (FT1 <= 914.088)
+      tmp1 = 288.3;
+    else if (FT1 <= 914.554)
+      tmp1 = 288.4;
+    else if (FT1 <= 915.021)
+      tmp1 = 288.5;
+    else if (FT1 <= 915.489)
+      tmp1 = 288.6;
+    else if (FT1 <= 915.956)
+      tmp1 = 288.7;
+    else if (FT1 <= 916.423)
+      tmp1 = 288.8;
+    else if (FT1 <= 916.89)
+      tmp1 = 288.9;
+  } else if (FT1 <= 921.569) {
+    if (FT1 == 917.358)
+      tmp1 = 289;
+    else if (FT1 <= 917.825)
+      tmp1 = 289.1;
+    else if (FT1 <= 918.293)
+      tmp1 = 289.2;
+    else if (FT1 <= 918.761)
+      tmp1 = 289.3;
+    else if (FT1 <= 919.229)
+      tmp1 = 289.4;
+    else if (FT1 <= 919.697)
+      tmp1 = 289.5;
+    else if (FT1 <= 920.165)
+      tmp1 = 289.6;
+    else if (FT1 <= 920.633)
+      tmp1 = 289.7;
+    else if (FT1 <= 921.101)
+      tmp1 = 289.8;
+    else if (FT1 <= 921.569)
+      tmp1 = 289.9;
+  } else if (FT1 <= 926.257) {
+    if (FT1 == 922.038)
+      tmp1 = 290;
+    else if (FT1 <= 922.506)
+      tmp1 = 290.1;
+    else if (FT1 <= 922.975)
+      tmp1 = 290.2;
+    else if (FT1 <= 923.443)
+      tmp1 = 290.3;
+    else if (FT1 <= 923.912)
+      tmp1 = 290.4;
+    else if (FT1 <= 924.381)
+      tmp1 = 290.5;
+    else if (FT1 <= 924.85)
+      tmp1 = 290.6;
+    else if (FT1 <= 925.319)
+      tmp1 = 290.7;
+    else if (FT1 <= 925.788)
+      tmp1 = 290.8;
+    else if (FT1 <= 926.257)
+      tmp1 = 290.9;
+  } else if (FT1 <= 930.954) {
+    if (FT1 == 926.726)
+      tmp1 = 291;
+    else if (FT1 <= 927.196)
+      tmp1 = 291.1;
+    else if (FT1 <= 927.665)
+      tmp1 = 291.2;
+    else if (FT1 <= 928.135)
+      tmp1 = 291.3;
+    else if (FT1 <= 928.604)
+      tmp1 = 291.4;
+    else if (FT1 <= 929.074)
+      tmp1 = 291.5;
+    else if (FT1 <= 929.544)
+      tmp1 = 291.6;
+    else if (FT1 <= 930.014)
+      tmp1 = 291.7;
+    else if (FT1 <= 930.484)
+      tmp1 = 291.8;
+    else if (FT1 <= 930.954)
+      tmp1 = 291.9;
+  } else if (FT1 <= 935.66) {
+    if (FT1 == 931.424)
+      tmp1 = 292;
+    else if (FT1 <= 931.894)
+      tmp1 = 292.1;
+    else if (FT1 <= 932.365)
+      tmp1 = 292.2;
+    else if (FT1 <= 932.835)
+      tmp1 = 292.3;
+    else if (FT1 <= 933.306)
+      tmp1 = 292.4;
+    else if (FT1 <= 933.776)
+      tmp1 = 292.5;
+    else if (FT1 <= 934.247)
+      tmp1 = 292.6;
+    else if (FT1 <= 934.718)
+      tmp1 = 292.7;
+    else if (FT1 <= 935.189)
+      tmp1 = 292.8;
+    else if (FT1 <= 935.66)
+      tmp1 = 292.9;
+  } else if (FT1 <= 940.374) {
+    if (FT1 == 936.131)
+      tmp1 = 293;
+    else if (FT1 <= 936.602)
+      tmp1 = 293.1;
+    else if (FT1 <= 937.073)
+      tmp1 = 293.2;
+    else if (FT1 <= 937.544)
+      tmp1 = 293.3;
+    else if (FT1 <= 938.016)
+      tmp1 = 293.4;
+    else if (FT1 <= 938.487)
+      tmp1 = 293.5;
+    else if (FT1 <= 938.959)
+      tmp1 = 293.6;
+    else if (FT1 <= 939.431)
+      tmp1 = 293.7;
+    else if (FT1 <= 939.902)
+      tmp1 = 293.8;
+    else if (FT1 <= 940.374)
+      tmp1 = 293.9;
+  } else if (FT1 <= 945.098) {
+    if (FT1 == 940.846)
+      tmp1 = 294;
+    else if (FT1 <= 941.318)
+      tmp1 = 294.1;
+    else if (FT1 <= 941.79)
+      tmp1 = 294.2;
+    else if (FT1 <= 942.263)
+      tmp1 = 294.3;
+    else if (FT1 <= 942.735)
+      tmp1 = 294.4;
+    else if (FT1 <= 943.207)
+      tmp1 = 294.5;
+    else if (FT1 <= 943.68)
+      tmp1 = 294.6;
+    else if (FT1 <= 944.153)
+      tmp1 = 294.7;
+    else if (FT1 <= 944.625)
+      tmp1 = 294.8;
+    else if (FT1 <= 945.098)
+      tmp1 = 294.9;
+  } else if (FT1 <= 949.83) {
+    if (FT1 == 945.571)
+      tmp1 = 295;
+    else if (FT1 <= 946.044)
+      tmp1 = 295.1;
+    else if (FT1 <= 946.517)
+      tmp1 = 295.2;
+    else if (FT1 <= 946.99)
+      tmp1 = 295.3;
+    else if (FT1 <= 947.463)
+      tmp1 = 295.4;
+    else if (FT1 <= 947.936)
+      tmp1 = 295.5;
+    else if (FT1 <= 948.41)
+      tmp1 = 295.6;
+    else if (FT1 <= 948.883)
+      tmp1 = 295.7;
+    else if (FT1 <= 949.357)
+      tmp1 = 295.8;
+    else if (FT1 <= 949.83)
+      tmp1 = 295.9;
+  } else if (FT1 <= 954.572) {
+    if (FT1 == 950.304)
+      tmp1 = 296;
+    else if (FT1 <= 950.778)
+      tmp1 = 296.1;
+    else if (FT1 <= 951.252)
+      tmp1 = 296.2;
+    else if (FT1 <= 951.726)
+      tmp1 = 296.3;
+    else if (FT1 <= 952.2)
+      tmp1 = 296.4;
+    else if (FT1 <= 952.674)
+      tmp1 = 296.5;
+    else if (FT1 <= 953.148)
+      tmp1 = 296.6;
+    else if (FT1 <= 953.623)
+      tmp1 = 296.7;
+    else if (FT1 <= 954.097)
+      tmp1 = 296.8;
+    else if (FT1 <= 954.572)
+      tmp1 = 296.9;
+  } else if (FT1 <= 959.322) {
+    if (FT1 == 955.046)
+      tmp1 = 297;
+    else if (FT1 <= 955.521)
+      tmp1 = 297.1;
+    else if (FT1 <= 955.996)
+      tmp1 = 297.2;
+    else if (FT1 <= 956.471)
+      tmp1 = 297.3;
+    else if (FT1 <= 956.946)
+      tmp1 = 297.4;
+    else if (FT1 <= 957.421)
+      tmp1 = 297.5;
+    else if (FT1 <= 957.896)
+      tmp1 = 297.6;
+    else if (FT1 <= 958.371)
+      tmp1 = 297.7;
+    else if (FT1 <= 958.846)
+      tmp1 = 297.8;
+    else if (FT1 <= 959.322)
+      tmp1 = 297.9;
+  } else if (FT1 <= 964.081) {
+    if (FT1 == 959.797)
+      tmp1 = 298;
+    else if (FT1 <= 960.273)
+      tmp1 = 298.1;
+    else if (FT1 <= 960.749)
+      tmp1 = 298.2;
+    else if (FT1 <= 961.224)
+      tmp1 = 298.3;
+    else if (FT1 <= 961.7)
+      tmp1 = 298.4;
+    else if (FT1 <= 962.176)
+      tmp1 = 298.5;
+    else if (FT1 <= 962.652)
+      tmp1 = 298.6;
+    else if (FT1 <= 963.128)
+      tmp1 = 298.7;
+    else if (FT1 <= 963.605)
+      tmp1 = 298.8;
+    else if (FT1 <= 964.081)
+      tmp1 = 298.9;
+  } else if (FT1 <= 968.848) {
+    if (FT1 == 964.557)
+      tmp1 = 299;
+    else if (FT1 <= 965.034)
+      tmp1 = 299.1;
+    else if (FT1 <= 965.51)
+      tmp1 = 299.2;
+    else if (FT1 <= 965.987)
+      tmp1 = 299.3;
+    else if (FT1 <= 966.464)
+      tmp1 = 299.4;
+    else if (FT1 <= 966.94)
+      tmp1 = 299.5;
+    else if (FT1 <= 967.417)
+      tmp1 = 299.6;
+    else if (FT1 <= 967.894)
+      tmp1 = 299.7;
+    else if (FT1 <= 968.371)
+      tmp1 = 299.8;
+    else if (FT1 <= 968.848)
+      tmp1 = 299.9;
+  } else if (FT1 <= 973.625) {
+    if (FT1 == 969.326)
+      tmp1 = 300;
+    else if (FT1 <= 969.803)
+      tmp1 = 300.1;
+    else if (FT1 <= 970.281)
+      tmp1 = 300.2;
+    else if (FT1 <= 970.758)
+      tmp1 = 300.3;
+    else if (FT1 <= 971.236)
+      tmp1 = 300.4;
+    else if (FT1 <= 971.713)
+      tmp1 = 300.5;
+    else if (FT1 <= 972.191)
+      tmp1 = 300.6;
+    else if (FT1 <= 972.669)
+      tmp1 = 300.7;
+    else if (FT1 <= 973.147)
+      tmp1 = 300.8;
+    else if (FT1 <= 973.625)
+      tmp1 = 300.9;
+  } else if (FT1 <= 978.41) {
+    if (FT1 == 974.103)
+      tmp1 = 301;
+    else if (FT1 <= 974.581)
+      tmp1 = 301.1;
+    else if (FT1 <= 975.06)
+      tmp1 = 301.2;
+    else if (FT1 <= 975.538)
+      tmp1 = 301.3;
+    else if (FT1 <= 976.016)
+      tmp1 = 301.4;
+    else if (FT1 <= 976.495)
+      tmp1 = 301.5;
+    else if (FT1 <= 976.974)
+      tmp1 = 301.6;
+    else if (FT1 <= 977.452)
+      tmp1 = 301.7;
+    else if (FT1 <= 977.931)
+      tmp1 = 301.8;
+    else if (FT1 <= 978.41)
+      tmp1 = 301.9;
+  } else if (FT1 <= 983.204) {
+    if (FT1 == 978.889)
+      tmp1 = 302;
+    else if (FT1 <= 979.368)
+      tmp1 = 302.1;
+    else if (FT1 <= 979.847)
+      tmp1 = 302.2;
+    else if (FT1 <= 980.327)
+      tmp1 = 302.3;
+    else if (FT1 <= 980.806)
+      tmp1 = 302.4;
+    else if (FT1 <= 981.285)
+      tmp1 = 302.5;
+    else if (FT1 <= 981.765)
+      tmp1 = 302.6;
+    else if (FT1 <= 982.245)
+      tmp1 = 302.7;
+    else if (FT1 <= 982.724)
+      tmp1 = 302.8;
+    else if (FT1 <= 983.204)
+      tmp1 = 302.9;
+  } else if (FT1 <= 988.007) {
+    if (FT1 == 983.684)
+      tmp1 = 303;
+    else if (FT1 <= 984.164)
+      tmp1 = 303.1;
+    else if (FT1 <= 984.644)
+      tmp1 = 303.2;
+    else if (FT1 <= 985.124)
+      tmp1 = 303.3;
+    else if (FT1 <= 985.604)
+      tmp1 = 303.4;
+    else if (FT1 <= 986.084)
+      tmp1 = 303.5;
+    else if (FT1 <= 986.565)
+      tmp1 = 303.6;
+    else if (FT1 <= 987.045)
+      tmp1 = 303.7;
+    else if (FT1 <= 987.526)
+      tmp1 = 303.8;
+    else if (FT1 <= 988.007)
+      tmp1 = 303.9;
+  } else if (FT1 <= 992.818) {
+    if (FT1 == 988.487)
+      tmp1 = 304;
+    else if (FT1 <= 988.968)
+      tmp1 = 304.1;
+    else if (FT1 <= 989.449)
+      tmp1 = 304.2;
+    else if (FT1 <= 989.93)
+      tmp1 = 304.3;
+    else if (FT1 <= 990.411)
+      tmp1 = 304.4;
+    else if (FT1 <= 990.892)
+      tmp1 = 304.5;
+    else if (FT1 <= 991.373)
+      tmp1 = 304.6;
+    else if (FT1 <= 991.855)
+      tmp1 = 304.7;
+    else if (FT1 <= 992.336)
+      tmp1 = 304.8;
+    else if (FT1 <= 992.818)
+      tmp1 = 304.9;
+  } else if (FT1 <= 997.637) {
+    if (FT1 == 993.299)
+      tmp1 = 305;
+    else if (FT1 <= 993.781)
+      tmp1 = 305.1;
+    else if (FT1 <= 994.263)
+      tmp1 = 305.2;
+    else if (FT1 <= 994.745)
+      tmp1 = 305.3;
+    else if (FT1 <= 995.226)
+      tmp1 = 305.4;
+    else if (FT1 <= 995.709)
+      tmp1 = 305.5;
+    else if (FT1 <= 996.191)
+      tmp1 = 305.6;
+    else if (FT1 <= 996.673)
+      tmp1 = 305.7;
+    else if (FT1 <= 997.155)
+      tmp1 = 305.8;
+    else if (FT1 <= 997.637)
+      tmp1 = 305.9;
+  } else if (FT1 <= 1002.47) {
+    if (FT1 == 998.12)
+      tmp1 = 306;
+    else if (FT1 <= 998.602)
+      tmp1 = 306.1;
+    else if (FT1 <= 999.085)
+      tmp1 = 306.2;
+    else if (FT1 <= 999.568)
+      tmp1 = 306.3;
+    else if (FT1 <= 1000.05)
+      tmp1 = 306.4;
+    else if (FT1 <= 1000.53)
+      tmp1 = 306.5;
+    else if (FT1 <= 1001.02)
+      tmp1 = 306.6;
+    else if (FT1 <= 1001.5)
+      tmp1 = 306.7;
+    else if (FT1 <= 1001.98)
+      tmp1 = 306.8;
+    else if (FT1 <= 1002.47)
+      tmp1 = 306.9;
+  } else if (FT1 <= 1007.3) {
+    if (FT1 == 1002.95)
+      tmp1 = 307;
+    else if (FT1 <= 1003.43)
+      tmp1 = 307.1;
+    else if (FT1 <= 1003.92)
+      tmp1 = 307.2;
+    else if (FT1 <= 1004.4)
+      tmp1 = 307.3;
+    else if (FT1 <= 1004.88)
+      tmp1 = 307.4;
+    else if (FT1 <= 1005.37)
+      tmp1 = 307.5;
+    else if (FT1 <= 1005.85)
+      tmp1 = 307.6;
+    else if (FT1 <= 1006.33)
+      tmp1 = 307.7;
+    else if (FT1 <= 1006.82)
+      tmp1 = 307.8;
+    else if (FT1 <= 1007.3)
+      tmp1 = 307.9;
+  } else if (FT1 <= 1012.15) {
+    if (FT1 == 1007.79)
+      tmp1 = 308;
+    else if (FT1 <= 1008.27)
+      tmp1 = 308.1;
+    else if (FT1 <= 1008.76)
+      tmp1 = 308.2;
+    else if (FT1 <= 1009.24)
+      tmp1 = 308.3;
+    else if (FT1 <= 1009.72)
+      tmp1 = 308.4;
+    else if (FT1 <= 1010.21)
+      tmp1 = 308.5;
+    else if (FT1 <= 1010.69)
+      tmp1 = 308.6;
+    else if (FT1 <= 1011.18)
+      tmp1 = 308.7;
+    else if (FT1 <= 1011.66)
+      tmp1 = 308.8;
+    else if (FT1 <= 1012.15)
+      tmp1 = 308.9;
+  } else if (FT1 <= 1017) {
+    if (FT1 == 1012.63)
+      tmp1 = 309;
+    else if (FT1 <= 1013.12)
+      tmp1 = 309.1;
+    else if (FT1 <= 1013.6)
+      tmp1 = 309.2;
+    else if (FT1 <= 1014.09)
+      tmp1 = 309.3;
+    else if (FT1 <= 1014.57)
+      tmp1 = 309.4;
+    else if (FT1 <= 1015.06)
+      tmp1 = 309.5;
+    else if (FT1 <= 1015.55)
+      tmp1 = 309.6;
+    else if (FT1 <= 1016.03)
+      tmp1 = 309.7;
+    else if (FT1 <= 1016.52)
+      tmp1 = 309.8;
+    else if (FT1 <= 1017)
+      tmp1 = 309.9;
+  } else if (FT1 <= 1021.86) {
+    if (FT1 == 1017.49)
+      tmp1 = 310;
+    else if (FT1 <= 1017.97)
+      tmp1 = 310.1;
+    else if (FT1 <= 1018.46)
+      tmp1 = 310.2;
+    else if (FT1 <= 1018.95)
+      tmp1 = 310.3;
+    else if (FT1 <= 1019.43)
+      tmp1 = 310.4;
+    else if (FT1 <= 1019.92)
+      tmp1 = 310.5;
+    else if (FT1 <= 1020.41)
+      tmp1 = 310.6;
+    else if (FT1 <= 1020.89)
+      tmp1 = 310.7;
+    else if (FT1 <= 1021.38)
+      tmp1 = 310.8;
+    else if (FT1 <= 1021.86)
+      tmp1 = 310.9;
+  } else if (FT1 <= 1026.74) {
+    if (FT1 == 1022.35)
+      tmp1 = 311;
+    else if (FT1 <= 1022.84)
+      tmp1 = 311.1;
+    else if (FT1 <= 1023.33)
+      tmp1 = 311.2;
+    else if (FT1 <= 1023.81)
+      tmp1 = 311.3;
+    else if (FT1 <= 1024.3)
+      tmp1 = 311.4;
+    else if (FT1 <= 1024.79)
+      tmp1 = 311.5;
+    else if (FT1 <= 1025.27)
+      tmp1 = 311.6;
+    else if (FT1 <= 1025.76)
+      tmp1 = 311.7;
+    else if (FT1 <= 1026.25)
+      tmp1 = 311.8;
+    else if (FT1 <= 1026.74)
+      tmp1 = 311.9;
+  } else if (FT1 <= 1031.61) {
+    if (FT1 == 1027.22)
+      tmp1 = 312;
+    else if (FT1 <= 1027.71)
+      tmp1 = 312.1;
+    else if (FT1 <= 1028.2)
+      tmp1 = 312.2;
+    else if (FT1 <= 1028.69)
+      tmp1 = 312.3;
+    else if (FT1 <= 1029.17)
+      tmp1 = 312.4;
+    else if (FT1 <= 1029.66)
+      tmp1 = 312.5;
+    else if (FT1 <= 1030.15)
+      tmp1 = 312.6;
+    else if (FT1 <= 1030.64)
+      tmp1 = 312.7;
+    else if (FT1 <= 1031.13)
+      tmp1 = 312.8;
+    else if (FT1 <= 1031.61)
+      tmp1 = 312.9;
+  } else if (FT1 <= 1036.5) {
+    if (FT1 == 1032.1)
+      tmp1 = 313;
+    else if (FT1 <= 1032.59)
+      tmp1 = 313.1;
+    else if (FT1 <= 1033.08)
+      tmp1 = 313.2;
+    else if (FT1 <= 1033.57)
+      tmp1 = 313.3;
+    else if (FT1 <= 1034.06)
+      tmp1 = 313.4;
+    else if (FT1 <= 1034.55)
+      tmp1 = 313.5;
+    else if (FT1 <= 1035.04)
+      tmp1 = 313.6;
+    else if (FT1 <= 1035.52)
+      tmp1 = 313.7;
+    else if (FT1 <= 1036.01)
+      tmp1 = 313.8;
+    else if (FT1 <= 1036.5)
+      tmp1 = 313.9;
+  } else if (FT1 <= 1041.4) {
+    if (FT1 == 1036.99)
+      tmp1 = 314;
+    else if (FT1 <= 1037.48)
+      tmp1 = 314.1;
+    else if (FT1 <= 1037.97)
+      tmp1 = 314.2;
+    else if (FT1 <= 1038.46)
+      tmp1 = 314.3;
+    else if (FT1 <= 1038.95)
+      tmp1 = 314.4;
+    else if (FT1 <= 1039.44)
+      tmp1 = 314.5;
+    else if (FT1 <= 1039.93)
+      tmp1 = 314.6;
+    else if (FT1 <= 1040.42)
+      tmp1 = 314.7;
+    else if (FT1 <= 1040.91)
+      tmp1 = 314.8;
+    else if (FT1 <= 1041.4)
+      tmp1 = 314.9;
+  } else if (FT1 <= 1046.3) {
+    if (FT1 == 1041.89)
+      tmp1 = 315;
+    else if (FT1 <= 1042.38)
+      tmp1 = 315.1;
+    else if (FT1 <= 1042.87)
+      tmp1 = 315.2;
+    else if (FT1 <= 1043.36)
+      tmp1 = 315.3;
+    else if (FT1 <= 1043.85)
+      tmp1 = 315.4;
+    else if (FT1 <= 1044.34)
+      tmp1 = 315.5;
+    else if (FT1 <= 1044.83)
+      tmp1 = 315.6;
+    else if (FT1 <= 1045.32)
+      tmp1 = 315.7;
+    else if (FT1 <= 1045.81)
+      tmp1 = 315.8;
+    else if (FT1 <= 1046.3)
+      tmp1 = 315.9;
+  } else if (FT1 <= 1051.22) {
+    if (FT1 == 1046.79)
+      tmp1 = 316;
+    else if (FT1 <= 1047.29)
+      tmp1 = 316.1;
+    else if (FT1 <= 1047.78)
+      tmp1 = 316.2;
+    else if (FT1 <= 1048.27)
+      tmp1 = 316.3;
+    else if (FT1 <= 1048.76)
+      tmp1 = 316.4;
+    else if (FT1 <= 1049.25)
+      tmp1 = 316.5;
+    else if (FT1 <= 1049.74)
+      tmp1 = 316.6;
+    else if (FT1 <= 1050.23)
+      tmp1 = 316.7;
+    else if (FT1 <= 1050.72)
+      tmp1 = 316.8;
+    else if (FT1 <= 1051.22)
+      tmp1 = 316.9;
+  } else if (FT1 <= 1056.14) {
+    if (FT1 == 1051.71)
+      tmp1 = 317;
+    else if (FT1 <= 1052.2)
+      tmp1 = 317.1;
+    else if (FT1 <= 1052.69)
+      tmp1 = 317.2;
+    else if (FT1 <= 1053.18)
+      tmp1 = 317.3;
+    else if (FT1 <= 1053.68)
+      tmp1 = 317.4;
+    else if (FT1 <= 1054.17)
+      tmp1 = 317.5;
+    else if (FT1 <= 1054.66)
+      tmp1 = 317.6;
+    else if (FT1 <= 1055.15)
+      tmp1 = 317.7;
+    else if (FT1 <= 1055.64)
+      tmp1 = 317.8;
+    else if (FT1 <= 1056.14)
+      tmp1 = 317.9;
+  } else if (FT1 <= 1061.07) {
+    if (FT1 == 1056.63)
+      tmp1 = 318;
+    else if (FT1 <= 1057.12)
+      tmp1 = 318.1;
+    else if (FT1 <= 1057.62)
+      tmp1 = 318.2;
+    else if (FT1 <= 1058.11)
+      tmp1 = 318.3;
+    else if (FT1 <= 1058.6)
+      tmp1 = 318.4;
+    else if (FT1 <= 1059.09)
+      tmp1 = 318.5;
+    else if (FT1 <= 1059.59)
+      tmp1 = 318.6;
+    else if (FT1 <= 1060.08)
+      tmp1 = 318.7;
+    else if (FT1 <= 1060.57)
+      tmp1 = 318.8;
+    else if (FT1 <= 1061.07)
+      tmp1 = 318.9;
+  } else if (FT1 <= 1066) {
+    if (FT1 == 1061.56)
+      tmp1 = 319;
+    else if (FT1 <= 1062.05)
+      tmp1 = 319.1;
+    else if (FT1 <= 1062.55)
+      tmp1 = 319.2;
+    else if (FT1 <= 1063.04)
+      tmp1 = 319.3;
+    else if (FT1 <= 1063.53)
+      tmp1 = 319.4;
+    else if (FT1 <= 1064.03)
+      tmp1 = 319.5;
+    else if (FT1 <= 1064.52)
+      tmp1 = 319.6;
+    else if (FT1 <= 1065.02)
+      tmp1 = 319.7;
+    else if (FT1 <= 1065.51)
+      tmp1 = 319.8;
+    else if (FT1 <= 1066)
+      tmp1 = 319.9;
+  } else if (FT1 <= 1070.95) {
+    if (FT1 == 1066.5)
+      tmp1 = 320;
+    else if (FT1 <= 1066.99)
+      tmp1 = 320.1;
+    else if (FT1 <= 1067.49)
+      tmp1 = 320.2;
+    else if (FT1 <= 1067.98)
+      tmp1 = 320.3;
+    else if (FT1 <= 1068.48)
+      tmp1 = 320.4;
+    else if (FT1 <= 1068.97)
+      tmp1 = 320.5;
+    else if (FT1 <= 1069.47)
+      tmp1 = 320.6;
+    else if (FT1 <= 1069.96)
+      tmp1 = 320.7;
+    else if (FT1 <= 1070.46)
+      tmp1 = 320.8;
+    else if (FT1 <= 1070.95)
+      tmp1 = 320.9;
+  } else if (FT1 <= 1075.9) {
+    if (FT1 == 1071.45)
+      tmp1 = 321;
+    else if (FT1 <= 1071.94)
+      tmp1 = 321.1;
+    else if (FT1 <= 1072.44)
+      tmp1 = 321.2;
+    else if (FT1 <= 1072.93)
+      tmp1 = 321.3;
+    else if (FT1 <= 1073.43)
+      tmp1 = 321.4;
+    else if (FT1 <= 1073.92)
+      tmp1 = 321.5;
+    else if (FT1 <= 1074.42)
+      tmp1 = 321.6;
+    else if (FT1 <= 1074.91)
+      tmp1 = 321.7;
+    else if (FT1 <= 1075.41)
+      tmp1 = 321.8;
+    else if (FT1 <= 1075.9)
+      tmp1 = 321.9;
+  } else if (FT1 <= 1080.87) {
+    if (FT1 == 1076.4)
+      tmp1 = 322;
+    else if (FT1 <= 1076.9)
+      tmp1 = 322.1;
+    else if (FT1 <= 1077.39)
+      tmp1 = 322.2;
+    else if (FT1 <= 1077.89)
+      tmp1 = 322.3;
+    else if (FT1 <= 1078.38)
+      tmp1 = 322.4;
+    else if (FT1 <= 1078.88)
+      tmp1 = 322.5;
+    else if (FT1 <= 1079.38)
+      tmp1 = 322.6;
+    else if (FT1 <= 1079.87)
+      tmp1 = 322.7;
+    else if (FT1 <= 1080.37)
+      tmp1 = 322.8;
+    else if (FT1 <= 1080.87)
+      tmp1 = 322.9;
+  } else if (FT1 <= 1085.84) {
+    if (FT1 == 1081.36)
+      tmp1 = 323;
+    else if (FT1 <= 1081.86)
+      tmp1 = 323.1;
+    else if (FT1 <= 1082.36)
+      tmp1 = 323.2;
+    else if (FT1 <= 1082.85)
+      tmp1 = 323.3;
+    else if (FT1 <= 1083.35)
+      tmp1 = 323.4;
+    else if (FT1 <= 1083.85)
+      tmp1 = 323.5;
+    else if (FT1 <= 1084.35)
+      tmp1 = 323.6;
+    else if (FT1 <= 1084.84)
+      tmp1 = 323.7;
+    else if (FT1 <= 1085.34)
+      tmp1 = 323.8;
+    else if (FT1 <= 1085.84)
+      tmp1 = 323.9;
+  } else if (FT1 <= 1090.82) {
+    if (FT1 == 1086.33)
+      tmp1 = 324;
+    else if (FT1 <= 1086.83)
+      tmp1 = 324.1;
+    else if (FT1 <= 1087.33)
+      tmp1 = 324.2;
+    else if (FT1 <= 1087.83)
+      tmp1 = 324.3;
+    else if (FT1 <= 1088.33)
+      tmp1 = 324.4;
+    else if (FT1 <= 1088.82)
+      tmp1 = 324.5;
+    else if (FT1 <= 1089.32)
+      tmp1 = 324.6;
+    else if (FT1 <= 1089.82)
+      tmp1 = 324.7;
+    else if (FT1 <= 1090.32)
+      tmp1 = 324.8;
+    else if (FT1 <= 1090.82)
+      tmp1 = 324.9;
+  } else if (FT1 <= 1095.8) {
+    if (FT1 == 1091.31)
+      tmp1 = 325;
+    else if (FT1 <= 1091.81)
+      tmp1 = 325.1;
+    else if (FT1 <= 1092.31)
+      tmp1 = 325.2;
+    else if (FT1 <= 1092.81)
+      tmp1 = 325.3;
+    else if (FT1 <= 1093.31)
+      tmp1 = 325.4;
+    else if (FT1 <= 1093.81)
+      tmp1 = 325.5;
+    else if (FT1 <= 1094.31)
+      tmp1 = 325.6;
+    else if (FT1 <= 1094.8)
+      tmp1 = 325.7;
+    else if (FT1 <= 1095.3)
+      tmp1 = 325.8;
+    else if (FT1 <= 1095.8)
+      tmp1 = 325.9;
+  } else if (FT1 <= 1100.8) {
+    if (FT1 == 1096.3)
+      tmp1 = 326;
+    else if (FT1 <= 1096.8)
+      tmp1 = 326.1;
+    else if (FT1 <= 1097.3)
+      tmp1 = 326.2;
+    else if (FT1 <= 1097.8)
+      tmp1 = 326.3;
+    else if (FT1 <= 1098.3)
+      tmp1 = 326.4;
+    else if (FT1 <= 1098.8)
+      tmp1 = 326.5;
+    else if (FT1 <= 1099.3)
+      tmp1 = 326.6;
+    else if (FT1 <= 1099.8)
+      tmp1 = 326.7;
+    else if (FT1 <= 1100.3)
+      tmp1 = 326.8;
+    else if (FT1 <= 1100.8)
+      tmp1 = 326.9;
+  } else if (FT1 <= 1105.8) {
+    if (FT1 == 1101.3)
+      tmp1 = 327;
+    else if (FT1 <= 1101.8)
+      tmp1 = 327.1;
+    else if (FT1 <= 1102.3)
+      tmp1 = 327.2;
+    else if (FT1 <= 1102.8)
+      tmp1 = 327.3;
+    else if (FT1 <= 1103.3)
+      tmp1 = 327.4;
+    else if (FT1 <= 1103.8)
+      tmp1 = 327.5;
+    else if (FT1 <= 1104.3)
+      tmp1 = 327.6;
+    else if (FT1 <= 1104.8)
+      tmp1 = 327.7;
+    else if (FT1 <= 1105.3)
+      tmp1 = 327.8;
+    else if (FT1 <= 1105.8)
+      tmp1 = 327.9;
+  } else if (FT1 <= 1110.81) {
+    if (FT1 == 1106.3)
+      tmp1 = 328;
+    else if (FT1 <= 1106.8)
+      tmp1 = 328.1;
+    else if (FT1 <= 1107.3)
+      tmp1 = 328.2;
+    else if (FT1 <= 1107.8)
+      tmp1 = 328.3;
+    else if (FT1 <= 1108.3)
+      tmp1 = 328.4;
+    else if (FT1 <= 1108.81)
+      tmp1 = 328.5;
+    else if (FT1 <= 1109.31)
+      tmp1 = 328.6;
+    else if (FT1 <= 1109.81)
+      tmp1 = 328.7;
+    else if (FT1 <= 1110.31)
+      tmp1 = 328.8;
+    else if (FT1 <= 1110.81)
+      tmp1 = 328.9;
+  } else if (FT1 <= 1115.83) {
+    if (FT1 == 1111.31)
+      tmp1 = 329;
+    else if (FT1 <= 1111.81)
+      tmp1 = 329.1;
+    else if (FT1 <= 1112.32)
+      tmp1 = 329.2;
+    else if (FT1 <= 1112.82)
+      tmp1 = 329.3;
+    else if (FT1 <= 1113.32)
+      tmp1 = 329.4;
+    else if (FT1 <= 1113.82)
+      tmp1 = 329.5;
+    else if (FT1 <= 1114.32)
+      tmp1 = 329.6;
+    else if (FT1 <= 1114.83)
+      tmp1 = 329.7;
+    else if (FT1 <= 1115.33)
+      tmp1 = 329.8;
+    else if (FT1 <= 1115.83)
+      tmp1 = 329.9;
+  } else if (FT1 <= 1120.86) {
+    if (FT1 == 1116.33)
+      tmp1 = 330;
+    else if (FT1 <= 1116.84)
+      tmp1 = 330.1;
+    else if (FT1 <= 1117.34)
+      tmp1 = 330.2;
+    else if (FT1 <= 1117.84)
+      tmp1 = 330.3;
+    else if (FT1 <= 1118.34)
+      tmp1 = 330.4;
+    else if (FT1 <= 1118.85)
+      tmp1 = 330.5;
+    else if (FT1 <= 1119.35)
+      tmp1 = 330.6;
+    else if (FT1 <= 1119.85)
+      tmp1 = 330.7;
+    else if (FT1 <= 1120.35)
+      tmp1 = 330.8;
+    else if (FT1 <= 1120.86)
+      tmp1 = 330.9;
+  } else if (FT1 <= 1125.89) {
+    if (FT1 == 1121.36)
+      tmp1 = 331;
+    else if (FT1 <= 1121.86)
+      tmp1 = 331.1;
+    else if (FT1 <= 1122.37)
+      tmp1 = 331.2;
+    else if (FT1 <= 1122.87)
+      tmp1 = 331.3;
+    else if (FT1 <= 1123.37)
+      tmp1 = 331.4;
+    else if (FT1 <= 1123.88)
+      tmp1 = 331.5;
+    else if (FT1 <= 1124.38)
+      tmp1 = 331.6;
+    else if (FT1 <= 1124.88)
+      tmp1 = 331.7;
+    else if (FT1 <= 1125.39)
+      tmp1 = 331.8;
+    else if (FT1 <= 1125.89)
+      tmp1 = 331.9;
+  } else if (FT1 <= 1130.93) {
+    if (FT1 == 1126.4)
+      tmp1 = 332;
+    else if (FT1 <= 1126.9)
+      tmp1 = 332.1;
+    else if (FT1 <= 1127.4)
+      tmp1 = 332.2;
+    else if (FT1 <= 1127.91)
+      tmp1 = 332.3;
+    else if (FT1 <= 1128.41)
+      tmp1 = 332.4;
+    else if (FT1 <= 1128.92)
+      tmp1 = 332.5;
+    else if (FT1 <= 1129.42)
+      tmp1 = 332.6;
+    else if (FT1 <= 1129.93)
+      tmp1 = 332.7;
+    else if (FT1 <= 1130.43)
+      tmp1 = 332.8;
+    else if (FT1 <= 1130.93)
+      tmp1 = 332.9;
+  } else if (FT1 <= 1135.99) {
+    if (FT1 == 1131.44)
+      tmp1 = 333;
+    else if (FT1 <= 1131.94)
+      tmp1 = 333.1;
+    else if (FT1 <= 1132.45)
+      tmp1 = 333.2;
+    else if (FT1 <= 1132.95)
+      tmp1 = 333.3;
+    else if (FT1 <= 1133.46)
+      tmp1 = 333.4;
+    else if (FT1 <= 1133.96)
+      tmp1 = 333.5;
+    else if (FT1 <= 1134.47)
+      tmp1 = 333.6;
+    else if (FT1 <= 1134.97)
+      tmp1 = 333.7;
+    else if (FT1 <= 1135.48)
+      tmp1 = 333.8;
+    else if (FT1 <= 1135.99)
+      tmp1 = 333.9;
+  } else if (FT1 <= 1141.04) {
+    if (FT1 == 1136.49)
+      tmp1 = 334;
+    else if (FT1 <= 1137)
+      tmp1 = 334.1;
+    else if (FT1 <= 1137.5)
+      tmp1 = 334.2;
+    else if (FT1 <= 1138.01)
+      tmp1 = 334.3;
+    else if (FT1 <= 1138.51)
+      tmp1 = 334.4;
+    else if (FT1 <= 1139.02)
+      tmp1 = 334.5;
+    else if (FT1 <= 1139.53)
+      tmp1 = 334.6;
+    else if (FT1 <= 1140.03)
+      tmp1 = 334.7;
+    else if (FT1 <= 1140.54)
+      tmp1 = 334.8;
+    else if (FT1 <= 1141.04)
+      tmp1 = 334.9;
+  } else if (FT1 <= 1146.11) {
+    if (FT1 == 1141.55)
+      tmp1 = 335;
+    else if (FT1 <= 1142.06)
+      tmp1 = 335.1;
+    else if (FT1 <= 1142.56)
+      tmp1 = 335.2;
+    else if (FT1 <= 1143.07)
+      tmp1 = 335.3;
+    else if (FT1 <= 1143.58)
+      tmp1 = 335.4;
+    else if (FT1 <= 1144.08)
+      tmp1 = 335.5;
+    else if (FT1 <= 1144.59)
+      tmp1 = 335.6;
+    else if (FT1 <= 1145.1)
+      tmp1 = 335.7;
+    else if (FT1 <= 1145.6)
+      tmp1 = 335.8;
+    else if (FT1 <= 1146.11)
+      tmp1 = 335.9;
+  } else if (FT1 <= 1151.19) {
+    if (FT1 == 1146.62)
+      tmp1 = 336;
+    else if (FT1 <= 1147.12)
+      tmp1 = 336.1;
+    else if (FT1 <= 1147.63)
+      tmp1 = 336.2;
+    else if (FT1 <= 1148.14)
+      tmp1 = 336.3;
+    else if (FT1 <= 1148.65)
+      tmp1 = 336.4;
+    else if (FT1 <= 1149.15)
+      tmp1 = 336.5;
+    else if (FT1 <= 1149.66)
+      tmp1 = 336.6;
+    else if (FT1 <= 1150.17)
+      tmp1 = 336.7;
+    else if (FT1 <= 1150.68)
+      tmp1 = 336.8;
+    else if (FT1 <= 1151.19)
+      tmp1 = 336.9;
+  } else if (FT1 <= 1156.27) {
+    if (FT1 == 1151.69)
+      tmp1 = 337;
+    else if (FT1 <= 1152.2)
+      tmp1 = 337.1;
+    else if (FT1 <= 1152.71)
+      tmp1 = 337.2;
+    else if (FT1 <= 1153.22)
+      tmp1 = 337.3;
+    else if (FT1 <= 1153.73)
+      tmp1 = 337.4;
+    else if (FT1 <= 1154.23)
+      tmp1 = 337.5;
+    else if (FT1 <= 1154.74)
+      tmp1 = 337.6;
+    else if (FT1 <= 1155.25)
+      tmp1 = 337.7;
+    else if (FT1 <= 1155.76)
+      tmp1 = 337.8;
+    else if (FT1 <= 1156.27)
+      tmp1 = 337.9;
+  } else if (FT1 <= 1161.36) {
+    if (FT1 == 1156.78)
+      tmp1 = 338;
+    else if (FT1 <= 1157.28)
+      tmp1 = 338.1;
+    else if (FT1 <= 1157.79)
+      tmp1 = 338.2;
+    else if (FT1 <= 1158.3)
+      tmp1 = 338.3;
+    else if (FT1 <= 1158.81)
+      tmp1 = 338.4;
+    else if (FT1 <= 1159.32)
+      tmp1 = 338.5;
+    else if (FT1 <= 1159.83)
+      tmp1 = 338.6;
+    else if (FT1 <= 1160.34)
+      tmp1 = 338.7;
+    else if (FT1 <= 1160.85)
+      tmp1 = 338.8;
+    else if (FT1 <= 1161.36)
+      tmp1 = 338.9;
+  } else if (FT1 <= 1166.45) {
+    if (FT1 == 1161.87)
+      tmp1 = 339;
+    else if (FT1 <= 1162.38)
+      tmp1 = 339.1;
+    else if (FT1 <= 1162.89)
+      tmp1 = 339.2;
+    else if (FT1 <= 1163.4)
+      tmp1 = 339.3;
+    else if (FT1 <= 1163.91)
+      tmp1 = 339.4;
+    else if (FT1 <= 1164.41)
+      tmp1 = 339.5;
+    else if (FT1 <= 1164.92)
+      tmp1 = 339.6;
+    else if (FT1 <= 1165.43)
+      tmp1 = 339.7;
+    else if (FT1 <= 1165.94)
+      tmp1 = 339.8;
+    else if (FT1 <= 1166.45)
+      tmp1 = 339.9;
+  } else if (FT1 <= 1171.56) {
+    if (FT1 == 1166.97)
+      tmp1 = 340;
+    else if (FT1 <= 1167.48)
+      tmp1 = 340.1;
+    else if (FT1 <= 1167.99)
+      tmp1 = 340.2;
+    else if (FT1 <= 1168.5)
+      tmp1 = 340.3;
+    else if (FT1 <= 1169.01)
+      tmp1 = 340.4;
+    else if (FT1 <= 1169.52)
+      tmp1 = 340.5;
+    else if (FT1 <= 1170.03)
+      tmp1 = 340.6;
+    else if (FT1 <= 1170.54)
+      tmp1 = 340.7;
+    else if (FT1 <= 1171.05)
+      tmp1 = 340.8;
+    else if (FT1 <= 1171.56)
+      tmp1 = 340.9;
+  } else if (FT1 <= 1176.67) {
+    if (FT1 == 1172.07)
+      tmp1 = 341;
+    else if (FT1 <= 1172.58)
+      tmp1 = 341.1;
+    else if (FT1 <= 1173.09)
+      tmp1 = 341.2;
+    else if (FT1 <= 1173.6)
+      tmp1 = 341.3;
+    else if (FT1 <= 1174.12)
+      tmp1 = 341.4;
+    else if (FT1 <= 1174.63)
+      tmp1 = 341.5;
+    else if (FT1 <= 1175.14)
+      tmp1 = 341.6;
+    else if (FT1 <= 1175.65)
+      tmp1 = 341.7;
+    else if (FT1 <= 1176.16)
+      tmp1 = 341.8;
+    else if (FT1 <= 1176.67)
+      tmp1 = 341.9;
+  } else if (FT1 <= 1181.79) {
+    if (FT1 == 1177.19)
+      tmp1 = 342;
+    else if (FT1 <= 1177.7)
+      tmp1 = 342.1;
+    else if (FT1 <= 1178.21)
+      tmp1 = 342.2;
+    else if (FT1 <= 1178.72)
+      tmp1 = 342.3;
+    else if (FT1 <= 1179.23)
+      tmp1 = 342.4;
+    else if (FT1 <= 1179.75)
+      tmp1 = 342.5;
+    else if (FT1 <= 1180.26)
+      tmp1 = 342.6;
+    else if (FT1 <= 1180.77)
+      tmp1 = 342.7;
+    else if (FT1 <= 1181.28)
+      tmp1 = 342.8;
+    else if (FT1 <= 1181.79)
+      tmp1 = 342.9;
+  } else if (FT1 <= 1186.92) {
+    if (FT1 == 1182.31)
+      tmp1 = 343;
+    else if (FT1 <= 1182.82)
+      tmp1 = 343.1;
+    else if (FT1 <= 1183.33)
+      tmp1 = 343.2;
+    else if (FT1 <= 1183.85)
+      tmp1 = 343.3;
+    else if (FT1 <= 1184.36)
+      tmp1 = 343.4;
+    else if (FT1 <= 1184.87)
+      tmp1 = 343.5;
+    else if (FT1 <= 1185.38)
+      tmp1 = 343.6;
+    else if (FT1 <= 1185.9)
+      tmp1 = 343.7;
+    else if (FT1 <= 1186.41)
+      tmp1 = 343.8;
+    else if (FT1 <= 1186.92)
+      tmp1 = 343.9;
+  } else if (FT1 <= 1192.06) {
+    if (FT1 == 1187.44)
+      tmp1 = 344;
+    else if (FT1 <= 1187.95)
+      tmp1 = 344.1;
+    else if (FT1 <= 1188.46)
+      tmp1 = 344.2;
+    else if (FT1 <= 1188.98)
+      tmp1 = 344.3;
+    else if (FT1 <= 1189.49)
+      tmp1 = 344.4;
+    else if (FT1 <= 1190)
+      tmp1 = 344.5;
+    else if (FT1 <= 1190.52)
+      tmp1 = 344.6;
+    else if (FT1 <= 1191.03)
+      tmp1 = 344.7;
+    else if (FT1 <= 1191.55)
+      tmp1 = 344.8;
+    else if (FT1 <= 1192.06)
+      tmp1 = 344.9;
+  } else if (FT1 <= 1197.2) {
+    if (FT1 == 1192.57)
+      tmp1 = 345;
+    else if (FT1 <= 1193.09)
+      tmp1 = 345.1;
+    else if (FT1 <= 1193.6)
+      tmp1 = 345.2;
+    else if (FT1 <= 1194.12)
+      tmp1 = 345.3;
+    else if (FT1 <= 1194.63)
+      tmp1 = 345.4;
+    else if (FT1 <= 1195.14)
+      tmp1 = 345.5;
+    else if (FT1 <= 1195.66)
+      tmp1 = 345.6;
+    else if (FT1 <= 1196.17)
+      tmp1 = 345.7;
+    else if (FT1 <= 1196.69)
+      tmp1 = 345.8;
+    else if (FT1 <= 1197.2)
+      tmp1 = 345.9;
+  } else if (FT1 <= 1202.35) {
+    if (FT1 == 1197.72)
+      tmp1 = 346;
+    else if (FT1 <= 1198.23)
+      tmp1 = 346.1;
+    else if (FT1 <= 1198.75)
+      tmp1 = 346.2;
+    else if (FT1 <= 1199.26)
+      tmp1 = 346.3;
+    else if (FT1 <= 1199.78)
+      tmp1 = 346.4;
+    else if (FT1 <= 1200.29)
+      tmp1 = 346.5;
+    else if (FT1 <= 1200.81)
+      tmp1 = 346.6;
+    else if (FT1 <= 1201.32)
+      tmp1 = 346.7;
+    else if (FT1 <= 1201.84)
+      tmp1 = 346.8;
+    else if (FT1 <= 1202.35)
+      tmp1 = 346.9;
+  } else if (FT1 <= 1207.51) {
+    if (FT1 == 1202.87)
+      tmp1 = 347;
+    else if (FT1 <= 1203.39)
+      tmp1 = 347.1;
+    else if (FT1 <= 1203.9)
+      tmp1 = 347.2;
+    else if (FT1 <= 1204.42)
+      tmp1 = 347.3;
+    else if (FT1 <= 1204.93)
+      tmp1 = 347.4;
+    else if (FT1 <= 1205.45)
+      tmp1 = 347.5;
+    else if (FT1 <= 1205.97)
+      tmp1 = 347.6;
+    else if (FT1 <= 1206.48)
+      tmp1 = 347.7;
+    else if (FT1 <= 1207)
+      tmp1 = 347.8;
+    else if (FT1 <= 1207.51)
+      tmp1 = 347.9;
+  } else if (FT1 <= 1212.68) {
+    if (FT1 == 1208.03)
+      tmp1 = 348;
+    else if (FT1 <= 1208.55)
+      tmp1 = 348.1;
+    else if (FT1 <= 1209.06)
+      tmp1 = 348.2;
+    else if (FT1 <= 1209.58)
+      tmp1 = 348.3;
+    else if (FT1 <= 1210.1)
+      tmp1 = 348.4;
+    else if (FT1 <= 1210.61)
+      tmp1 = 348.5;
+    else if (FT1 <= 1211.13)
+      tmp1 = 348.6;
+    else if (FT1 <= 1211.65)
+      tmp1 = 348.7;
+    else if (FT1 <= 1212.16)
+      tmp1 = 348.8;
+    else if (FT1 <= 1212.68)
+      tmp1 = 348.9;
+  } else if (FT1 <= 1217.85) {
+    if (FT1 == 1213.2)
+      tmp1 = 349;
+    else if (FT1 <= 1213.71)
+      tmp1 = 349.1;
+    else if (FT1 <= 1214.23)
+      tmp1 = 349.2;
+    else if (FT1 <= 1214.75)
+      tmp1 = 349.3;
+    else if (FT1 <= 1215.27)
+      tmp1 = 349.4;
+    else if (FT1 <= 1215.78)
+      tmp1 = 349.5;
+    else if (FT1 <= 1216.3)
+      tmp1 = 349.6;
+    else if (FT1 <= 1216.82)
+      tmp1 = 349.7;
+    else if (FT1 <= 1217.34)
+      tmp1 = 349.8;
+    else if (FT1 <= 1217.85)
+      tmp1 = 349.9;
+  } else if (FT1 <= 1223.04) {
+    if (FT1 == 1218.37)
+      tmp1 = 350;
+    else if (FT1 <= 1218.89)
+      tmp1 = 350.1;
+    else if (FT1 <= 1219.41)
+      tmp1 = 350.2;
+    else if (FT1 <= 1219.93)
+      tmp1 = 350.3;
+    else if (FT1 <= 1220.44)
+      tmp1 = 350.4;
+    else if (FT1 <= 1220.96)
+      tmp1 = 350.5;
+    else if (FT1 <= 1221.48)
+      tmp1 = 350.6;
+    else if (FT1 <= 1222)
+      tmp1 = 350.7;
+    else if (FT1 <= 1222.52)
+      tmp1 = 350.8;
+    else if (FT1 <= 1223.04)
+      tmp1 = 350.9;
+  } else if (FT1 <= 1228.23) {
+    if (FT1 == 1223.56)
+      tmp1 = 351;
+    else if (FT1 <= 1224.07)
+      tmp1 = 351.1;
+    else if (FT1 <= 1224.59)
+      tmp1 = 351.2;
+    else if (FT1 <= 1225.11)
+      tmp1 = 351.3;
+    else if (FT1 <= 1225.63)
+      tmp1 = 351.4;
+    else if (FT1 <= 1226.15)
+      tmp1 = 351.5;
+    else if (FT1 <= 1226.67)
+      tmp1 = 351.6;
+    else if (FT1 <= 1227.19)
+      tmp1 = 351.7;
+    else if (FT1 <= 1227.71)
+      tmp1 = 351.8;
+    else if (FT1 <= 1228.23)
+      tmp1 = 351.9;
+  } else if (FT1 <= 1233.42) {
+    if (FT1 == 1228.75)
+      tmp1 = 352;
+    else if (FT1 <= 1229.26)
+      tmp1 = 352.1;
+    else if (FT1 <= 1229.78)
+      tmp1 = 352.2;
+    else if (FT1 <= 1230.3)
+      tmp1 = 352.3;
+    else if (FT1 <= 1230.82)
+      tmp1 = 352.4;
+    else if (FT1 <= 1231.34)
+      tmp1 = 352.5;
+    else if (FT1 <= 1231.86)
+      tmp1 = 352.6;
+    else if (FT1 <= 1232.38)
+      tmp1 = 352.7;
+    else if (FT1 <= 1232.9)
+      tmp1 = 352.8;
+    else if (FT1 <= 1233.42)
+      tmp1 = 352.9;
+  } else if (FT1 <= 1238.63) {
+    if (FT1 == 1233.94)
+      tmp1 = 353;
+    else if (FT1 <= 1234.46)
+      tmp1 = 353.1;
+    else if (FT1 <= 1234.98)
+      tmp1 = 353.2;
+    else if (FT1 <= 1235.5)
+      tmp1 = 353.3;
+    else if (FT1 <= 1236.02)
+      tmp1 = 353.4;
+    else if (FT1 <= 1236.54)
+      tmp1 = 353.5;
+    else if (FT1 <= 1237.06)
+      tmp1 = 353.6;
+    else if (FT1 <= 1237.59)
+      tmp1 = 353.7;
+    else if (FT1 <= 1238.11)
+      tmp1 = 353.8;
+    else if (FT1 <= 1238.63)
+      tmp1 = 353.9;
+  } else if (FT1 <= 1243.84) {
+    if (FT1 == 1239.15)
+      tmp1 = 354;
+    else if (FT1 <= 1239.67)
+      tmp1 = 354.1;
+    else if (FT1 <= 1240.19)
+      tmp1 = 354.2;
+    else if (FT1 <= 1240.71)
+      tmp1 = 354.3;
+    else if (FT1 <= 1241.23)
+      tmp1 = 354.4;
+    else if (FT1 <= 1241.75)
+      tmp1 = 354.5;
+    else if (FT1 <= 1242.27)
+      tmp1 = 354.6;
+    else if (FT1 <= 1242.8)
+      tmp1 = 354.7;
+    else if (FT1 <= 1243.32)
+      tmp1 = 354.8;
+    else if (FT1 <= 1243.84)
+      tmp1 = 354.9;
+  } else if (FT1 <= 1249.06) {
+    if (FT1 == 1244.36)
+      tmp1 = 355;
+    else if (FT1 <= 1244.88)
+      tmp1 = 355.1;
+    else if (FT1 <= 1245.4)
+      tmp1 = 355.2;
+    else if (FT1 <= 1245.92)
+      tmp1 = 355.3;
+    else if (FT1 <= 1246.45)
+      tmp1 = 355.4;
+    else if (FT1 <= 1246.97)
+      tmp1 = 355.5;
+    else if (FT1 <= 1247.49)
+      tmp1 = 355.6;
+    else if (FT1 <= 1248.01)
+      tmp1 = 355.7;
+    else if (FT1 <= 1248.53)
+      tmp1 = 355.8;
+    else if (FT1 <= 1249.06)
+      tmp1 = 355.9;
+  } else if (FT1 <= 1254.28) {
+    if (FT1 == 1249.58)
+      tmp1 = 356;
+    else if (FT1 <= 1250.1)
+      tmp1 = 356.1;
+    else if (FT1 <= 1250.62)
+      tmp1 = 356.2;
+    else if (FT1 <= 1251.15)
+      tmp1 = 356.3;
+    else if (FT1 <= 1251.67)
+      tmp1 = 356.4;
+    else if (FT1 <= 1252.19)
+      tmp1 = 356.5;
+    else if (FT1 <= 1252.71)
+      tmp1 = 356.6;
+    else if (FT1 <= 1253.24)
+      tmp1 = 356.7;
+    else if (FT1 <= 1253.76)
+      tmp1 = 356.8;
+    else if (FT1 <= 1254.28)
+      tmp1 = 356.9;
+  } else if (FT1 <= 1259.52) {
+    if (FT1 == 1254.81)
+      tmp1 = 357;
+    else if (FT1 <= 1255.33)
+      tmp1 = 357.1;
+    else if (FT1 <= 1255.85)
+      tmp1 = 357.2;
+    else if (FT1 <= 1256.38)
+      tmp1 = 357.3;
+    else if (FT1 <= 1256.9)
+      tmp1 = 357.4;
+    else if (FT1 <= 1257.42)
+      tmp1 = 357.5;
+    else if (FT1 <= 1257.95)
+      tmp1 = 357.6;
+    else if (FT1 <= 1258.47)
+      tmp1 = 357.7;
+    else if (FT1 <= 1258.99)
+      tmp1 = 357.8;
+    else if (FT1 <= 1259.52)
+      tmp1 = 357.9;
+  } else if (FT1 <= 1264.76) {
+    if (FT1 == 1260.04)
+      tmp1 = 358;
+    else if (FT1 <= 1260.56)
+      tmp1 = 358.1;
+    else if (FT1 <= 1261.09)
+      tmp1 = 358.2;
+    else if (FT1 <= 1261.61)
+      tmp1 = 358.3;
+    else if (FT1 <= 1262.14)
+      tmp1 = 358.4;
+    else if (FT1 <= 1262.66)
+      tmp1 = 358.5;
+    else if (FT1 <= 1263.19)
+      tmp1 = 358.6;
+    else if (FT1 <= 1263.71)
+      tmp1 = 358.7;
+    else if (FT1 <= 1264.23)
+      tmp1 = 358.8;
+    else if (FT1 <= 1264.76)
+      tmp1 = 358.9;
+  } else if (FT1 <= 1270.01) {
+    if (FT1 == 1265.28)
+      tmp1 = 359;
+    else if (FT1 <= 1265.81)
+      tmp1 = 359.1;
+    else if (FT1 <= 1266.33)
+      tmp1 = 359.2;
+    else if (FT1 <= 1266.86)
+      tmp1 = 359.3;
+    else if (FT1 <= 1267.38)
+      tmp1 = 359.4;
+    else if (FT1 <= 1267.91)
+      tmp1 = 359.5;
+    else if (FT1 <= 1268.43)
+      tmp1 = 359.6;
+    else if (FT1 <= 1268.96)
+      tmp1 = 359.7;
+    else if (FT1 <= 1269.48)
+      tmp1 = 359.8;
+    else if (FT1 <= 1270.01)
+      tmp1 = 359.9;
+  } else if (FT1 <= 1275.26) {
+    if (FT1 == 1270.53)
+      tmp1 = 360;
+    else if (FT1 <= 1271.06)
+      tmp1 = 360.1;
+    else if (FT1 <= 1271.58)
+      tmp1 = 360.2;
+    else if (FT1 <= 1272.11)
+      tmp1 = 360.3;
+    else if (FT1 <= 1272.63)
+      tmp1 = 360.4;
+    else if (FT1 <= 1273.16)
+      tmp1 = 360.5;
+    else if (FT1 <= 1273.68)
+      tmp1 = 360.6;
+    else if (FT1 <= 1274.21)
+      tmp1 = 360.7;
+    else if (FT1 <= 1274.74)
+      tmp1 = 360.8;
+    else if (FT1 <= 1275.26)
+      tmp1 = 360.9;
+  } else if (FT1 <= 1280.53) {
+    if (FT1 == 1275.79)
+      tmp1 = 361;
+    else if (FT1 <= 1276.31)
+      tmp1 = 361.1;
+    else if (FT1 <= 1276.84)
+      tmp1 = 361.2;
+    else if (FT1 <= 1277.37)
+      tmp1 = 361.3;
+    else if (FT1 <= 1277.89)
+      tmp1 = 361.4;
+    else if (FT1 <= 1278.42)
+      tmp1 = 361.5;
+    else if (FT1 <= 1278.95)
+      tmp1 = 361.6;
+    else if (FT1 <= 1279.47)
+      tmp1 = 361.7;
+    else if (FT1 <= 1280)
+      tmp1 = 361.8;
+    else if (FT1 <= 1280.53)
+      tmp1 = 361.9;
+  } else if (FT1 <= 1285.8) {
+    if (FT1 == 1281.05)
+      tmp1 = 362;
+    else if (FT1 <= 1281.58)
+      tmp1 = 362.1;
+    else if (FT1 <= 1282.11)
+      tmp1 = 362.2;
+    else if (FT1 <= 1282.63)
+      tmp1 = 362.3;
+    else if (FT1 <= 1283.16)
+      tmp1 = 362.4;
+    else if (FT1 <= 1283.69)
+      tmp1 = 362.5;
+    else if (FT1 <= 1284.21)
+      tmp1 = 362.6;
+    else if (FT1 <= 1284.74)
+      tmp1 = 362.7;
+    else if (FT1 <= 1285.27)
+      tmp1 = 362.8;
+    else if (FT1 <= 1285.8)
+      tmp1 = 362.9;
+  } else if (FT1 <= 1291.07) {
+    if (FT1 == 1286.32)
+      tmp1 = 363;
+    else if (FT1 <= 1286.85)
+      tmp1 = 363.1;
+    else if (FT1 <= 1287.38)
+      tmp1 = 363.2;
+    else if (FT1 <= 1287.91)
+      tmp1 = 363.3;
+    else if (FT1 <= 1288.43)
+      tmp1 = 363.4;
+    else if (FT1 <= 1288.96)
+      tmp1 = 363.5;
+    else if (FT1 <= 1289.49)
+      tmp1 = 363.6;
+    else if (FT1 <= 1290.02)
+      tmp1 = 363.7;
+    else if (FT1 <= 1290.54)
+      tmp1 = 363.8;
+    else if (FT1 <= 1291.07)
+      tmp1 = 363.9;
+  } else if (FT1 <= 1296.36) {
+    if (FT1 == 1291.6)
+      tmp1 = 364;
+    else if (FT1 <= 1292.13)
+      tmp1 = 364.1;
+    else if (FT1 <= 1292.66)
+      tmp1 = 364.2;
+    else if (FT1 <= 1293.19)
+      tmp1 = 364.3;
+    else if (FT1 <= 1293.71)
+      tmp1 = 364.4;
+    else if (FT1 <= 1294.24)
+      tmp1 = 364.5;
+    else if (FT1 <= 1294.77)
+      tmp1 = 364.6;
+    else if (FT1 <= 1295.3)
+      tmp1 = 364.7;
+    else if (FT1 <= 1295.83)
+      tmp1 = 364.8;
+    else if (FT1 <= 1296.36)
+      tmp1 = 364.9;
+  } else if (FT1 <= 1301.65) {
+    if (FT1 == 1296.89)
+      tmp1 = 365;
+    else if (FT1 <= 1297.42)
+      tmp1 = 365.1;
+    else if (FT1 <= 1297.94)
+      tmp1 = 365.2;
+    else if (FT1 <= 1298.47)
+      tmp1 = 365.3;
+    else if (FT1 <= 1299)
+      tmp1 = 365.4;
+    else if (FT1 <= 1299.53)
+      tmp1 = 365.5;
+    else if (FT1 <= 1300.06)
+      tmp1 = 365.6;
+    else if (FT1 <= 1300.59)
+      tmp1 = 365.7;
+    else if (FT1 <= 1301.12)
+      tmp1 = 365.8;
+    else if (FT1 <= 1301.65)
+      tmp1 = 365.9;
+  } else if (FT1 <= 1306.95) {
+    if (FT1 == 1302.18)
+      tmp1 = 366;
+    else if (FT1 <= 1302.71)
+      tmp1 = 366.1;
+    else if (FT1 <= 1303.24)
+      tmp1 = 366.2;
+    else if (FT1 <= 1303.77)
+      tmp1 = 366.3;
+    else if (FT1 <= 1304.3)
+      tmp1 = 366.4;
+    else if (FT1 <= 1304.83)
+      tmp1 = 366.5;
+    else if (FT1 <= 1305.36)
+      tmp1 = 366.6;
+    else if (FT1 <= 1305.89)
+      tmp1 = 366.7;
+    else if (FT1 <= 1306.42)
+      tmp1 = 366.8;
+    else if (FT1 <= 1306.95)
+      tmp1 = 366.9;
+  } else if (FT1 <= 1312.25) {
+    if (FT1 == 1307.48)
+      tmp1 = 367;
+    else if (FT1 <= 1308.01)
+      tmp1 = 367.1;
+    else if (FT1 <= 1308.54)
+      tmp1 = 367.2;
+    else if (FT1 <= 1309.07)
+      tmp1 = 367.3;
+    else if (FT1 <= 1309.6)
+      tmp1 = 367.4;
+    else if (FT1 <= 1310.13)
+      tmp1 = 367.5;
+    else if (FT1 <= 1310.66)
+      tmp1 = 367.6;
+    else if (FT1 <= 1311.19)
+      tmp1 = 367.7;
+    else if (FT1 <= 1311.72)
+      tmp1 = 367.8;
+    else if (FT1 <= 1312.25)
+      tmp1 = 367.9;
+  } else if (FT1 <= 1317.57) {
+    if (FT1 == 1312.79)
+      tmp1 = 368;
+    else if (FT1 <= 1313.32)
+      tmp1 = 368.1;
+    else if (FT1 <= 1313.85)
+      tmp1 = 368.2;
+    else if (FT1 <= 1314.38)
+      tmp1 = 368.3;
+    else if (FT1 <= 1314.91)
+      tmp1 = 368.4;
+    else if (FT1 <= 1315.44)
+      tmp1 = 368.5;
+    else if (FT1 <= 1315.97)
+      tmp1 = 368.6;
+    else if (FT1 <= 1316.5)
+      tmp1 = 368.7;
+    else if (FT1 <= 1317.04)
+      tmp1 = 368.8;
+    else if (FT1 <= 1317.57)
+      tmp1 = 368.9;
+  } else if (FT1 <= 1322.89) {
+    if (FT1 == 1318.1)
+      tmp1 = 369;
+    else if (FT1 <= 1318.63)
+      tmp1 = 369.1;
+    else if (FT1 <= 1319.16)
+      tmp1 = 369.2;
+    else if (FT1 <= 1319.69)
+      tmp1 = 369.3;
+    else if (FT1 <= 1320.23)
+      tmp1 = 369.4;
+    else if (FT1 <= 1320.76)
+      tmp1 = 369.5;
+    else if (FT1 <= 1321.29)
+      tmp1 = 369.6;
+    else if (FT1 <= 1321.82)
+      tmp1 = 369.7;
+    else if (FT1 <= 1322.36)
+      tmp1 = 369.8;
+    else if (FT1 <= 1322.89)
+      tmp1 = 369.9;
+  } else if (FT1 <= 1328.22) {
+    if (FT1 == 1323.42)
+      tmp1 = 370;
+    else if (FT1 <= 1323.95)
+      tmp1 = 370.1;
+    else if (FT1 <= 1324.49)
+      tmp1 = 370.2;
+    else if (FT1 <= 1325.02)
+      tmp1 = 370.3;
+    else if (FT1 <= 1325.55)
+      tmp1 = 370.4;
+    else if (FT1 <= 1326.08)
+      tmp1 = 370.5;
+    else if (FT1 <= 1326.62)
+      tmp1 = 370.6;
+    else if (FT1 <= 1327.15)
+      tmp1 = 370.7;
+    else if (FT1 <= 1327.68)
+      tmp1 = 370.8;
+    else if (FT1 <= 1328.22)
+      tmp1 = 370.9;
+  } else if (FT1 <= 1333.55) {
+    if (FT1 == 1328.75)
+      tmp1 = 371;
+    else if (FT1 <= 1329.28)
+      tmp1 = 371.1;
+    else if (FT1 <= 1329.81)
+      tmp1 = 371.2;
+    else if (FT1 <= 1330.35)
+      tmp1 = 371.3;
+    else if (FT1 <= 1330.88)
+      tmp1 = 371.4;
+    else if (FT1 <= 1331.41)
+      tmp1 = 371.5;
+    else if (FT1 <= 1331.95)
+      tmp1 = 371.6;
+    else if (FT1 <= 1332.48)
+      tmp1 = 371.7;
+    else if (FT1 <= 1333.02)
+      tmp1 = 371.8;
+    else if (FT1 <= 1333.55)
+      tmp1 = 371.9;
+  } else if (FT1 <= 1338.89) {
+    if (FT1 == 1334.08)
+      tmp1 = 372;
+    else if (FT1 <= 1334.62)
+      tmp1 = 372.1;
+    else if (FT1 <= 1335.15)
+      tmp1 = 372.2;
+    else if (FT1 <= 1335.69)
+      tmp1 = 372.3;
+    else if (FT1 <= 1336.22)
+      tmp1 = 372.4;
+    else if (FT1 <= 1336.75)
+      tmp1 = 372.5;
+    else if (FT1 <= 1337.29)
+      tmp1 = 372.6;
+    else if (FT1 <= 1337.82)
+      tmp1 = 372.7;
+    else if (FT1 <= 1338.36)
+      tmp1 = 372.8;
+    else if (FT1 <= 1338.89)
+      tmp1 = 372.9;
+  } else if (FT1 <= 1344.24) {
+    if (FT1 == 1339.43)
+      tmp1 = 373;
+    else if (FT1 <= 1339.96)
+      tmp1 = 373.1;
+    else if (FT1 <= 1340.49)
+      tmp1 = 373.2;
+    else if (FT1 <= 1341.03)
+      tmp1 = 373.3;
+    else if (FT1 <= 1341.56)
+      tmp1 = 373.4;
+    else if (FT1 <= 1342.1)
+      tmp1 = 373.5;
+    else if (FT1 <= 1342.63)
+      tmp1 = 373.6;
+    else if (FT1 <= 1343.17)
+      tmp1 = 373.7;
+    else if (FT1 <= 1343.7)
+      tmp1 = 373.8;
+    else if (FT1 <= 1344.24)
+      tmp1 = 373.9;
+  } else if (FT1 <= 1349.6) {
+    if (FT1 == 1344.77)
+      tmp1 = 374;
+    else if (FT1 <= 1345.31)
+      tmp1 = 374.1;
+    else if (FT1 <= 1345.85)
+      tmp1 = 374.2;
+    else if (FT1 <= 1346.38)
+      tmp1 = 374.3;
+    else if (FT1 <= 1346.92)
+      tmp1 = 374.4;
+    else if (FT1 <= 1347.45)
+      tmp1 = 374.5;
+    else if (FT1 <= 1347.99)
+      tmp1 = 374.6;
+    else if (FT1 <= 1348.52)
+      tmp1 = 374.7;
+    else if (FT1 <= 1349.06)
+      tmp1 = 374.8;
+    else if (FT1 <= 1349.6)
+      tmp1 = 374.9;
+  } else if (FT1 <= 1354.96) {
+    if (FT1 == 1350.13)
+      tmp1 = 375;
+    else if (FT1 <= 1350.67)
+      tmp1 = 375.1;
+    else if (FT1 <= 1351.2)
+      tmp1 = 375.2;
+    else if (FT1 <= 1351.74)
+      tmp1 = 375.3;
+    else if (FT1 <= 1352.28)
+      tmp1 = 375.4;
+    else if (FT1 <= 1352.81)
+      tmp1 = 375.5;
+    else if (FT1 <= 1353.35)
+      tmp1 = 375.6;
+    else if (FT1 <= 1353.88)
+      tmp1 = 375.7;
+    else if (FT1 <= 1354.42)
+      tmp1 = 375.8;
+    else if (FT1 <= 1354.96)
+      tmp1 = 375.9;
+  } else if (FT1 <= 1360.33) {
+    if (FT1 == 1355.49)
+      tmp1 = 376;
+    else if (FT1 <= 1356.03)
+      tmp1 = 376.1;
+    else if (FT1 <= 1356.57)
+      tmp1 = 376.2;
+    else if (FT1 <= 1357.1)
+      tmp1 = 376.3;
+    else if (FT1 <= 1357.64)
+      tmp1 = 376.4;
+    else if (FT1 <= 1358.18)
+      tmp1 = 376.5;
+    else if (FT1 <= 1358.72)
+      tmp1 = 376.6;
+    else if (FT1 <= 1359.25)
+      tmp1 = 376.7;
+    else if (FT1 <= 1359.79)
+      tmp1 = 376.8;
+    else if (FT1 <= 1360.33)
+      tmp1 = 376.9;
+  } else if (FT1 <= 1365.7) {
+    if (FT1 == 1360.86)
+      tmp1 = 377;
+    else if (FT1 <= 1361.4)
+      tmp1 = 377.1;
+    else if (FT1 <= 1361.94)
+      tmp1 = 377.2;
+    else if (FT1 <= 1362.48)
+      tmp1 = 377.3;
+    else if (FT1 <= 1363.01)
+      tmp1 = 377.4;
+    else if (FT1 <= 1363.55)
+      tmp1 = 377.5;
+    else if (FT1 <= 1364.09)
+      tmp1 = 377.6;
+    else if (FT1 <= 1364.63)
+      tmp1 = 377.7;
+    else if (FT1 <= 1365.17)
+      tmp1 = 377.8;
+    else if (FT1 <= 1365.7)
+      tmp1 = 377.9;
+  } else if (FT1 <= 1371.09) {
+    if (FT1 == 1366.24)
+      tmp1 = 378;
+    else if (FT1 <= 1366.78)
+      tmp1 = 378.1;
+    else if (FT1 <= 1367.32)
+      tmp1 = 378.2;
+    else if (FT1 <= 1367.86)
+      tmp1 = 378.3;
+    else if (FT1 <= 1368.39)
+      tmp1 = 378.4;
+    else if (FT1 <= 1368.93)
+      tmp1 = 378.5;
+    else if (FT1 <= 1369.47)
+      tmp1 = 378.6;
+    else if (FT1 <= 1370.01)
+      tmp1 = 378.7;
+    else if (FT1 <= 1370.55)
+      tmp1 = 378.8;
+    else if (FT1 <= 1371.09)
+      tmp1 = 378.9;
+  } else if (FT1 <= 1376.48) {
+    if (FT1 == 1371.63)
+      tmp1 = 379;
+    else if (FT1 <= 1372.16)
+      tmp1 = 379.1;
+    else if (FT1 <= 1372.7)
+      tmp1 = 379.2;
+    else if (FT1 <= 1373.24)
+      tmp1 = 379.3;
+    else if (FT1 <= 1373.78)
+      tmp1 = 379.4;
+    else if (FT1 <= 1374.32)
+      tmp1 = 379.5;
+    else if (FT1 <= 1374.86)
+      tmp1 = 379.6;
+    else if (FT1 <= 1375.4)
+      tmp1 = 379.7;
+    else if (FT1 <= 1375.94)
+      tmp1 = 379.8;
+    else if (FT1 <= 1376.48)
+      tmp1 = 379.9;
+  } else if (FT1 <= 1381.87) {
+    if (FT1 == 1377.02)
+      tmp1 = 380;
+    else if (FT1 <= 1377.56)
+      tmp1 = 380.1;
+    else if (FT1 <= 1378.1)
+      tmp1 = 380.2;
+    else if (FT1 <= 1378.63)
+      tmp1 = 380.3;
+    else if (FT1 <= 1379.17)
+      tmp1 = 380.4;
+    else if (FT1 <= 1379.71)
+      tmp1 = 380.5;
+    else if (FT1 <= 1380.25)
+      tmp1 = 380.6;
+    else if (FT1 <= 1380.79)
+      tmp1 = 380.7;
+    else if (FT1 <= 1381.33)
+      tmp1 = 380.8;
+    else if (FT1 <= 1381.87)
+      tmp1 = 380.9;
+  } else if (FT1 <= 1387.28) {
+    if (FT1 == 1382.41)
+      tmp1 = 381;
+    else if (FT1 <= 1382.95)
+      tmp1 = 381.1;
+    else if (FT1 <= 1383.49)
+      tmp1 = 381.2;
+    else if (FT1 <= 1384.03)
+      tmp1 = 381.3;
+    else if (FT1 <= 1384.57)
+      tmp1 = 381.4;
+    else if (FT1 <= 1385.12)
+      tmp1 = 381.5;
+    else if (FT1 <= 1385.66)
+      tmp1 = 381.6;
+    else if (FT1 <= 1386.2)
+      tmp1 = 381.7;
+    else if (FT1 <= 1386.74)
+      tmp1 = 381.8;
+    else if (FT1 <= 1387.28)
+      tmp1 = 381.9;
+  } else if (FT1 <= 1392.69) {
+    if (FT1 == 1387.82)
+      tmp1 = 382;
+    else if (FT1 <= 1388.36)
+      tmp1 = 382.1;
+    else if (FT1 <= 1388.9)
+      tmp1 = 382.2;
+    else if (FT1 <= 1389.44)
+      tmp1 = 382.3;
+    else if (FT1 <= 1389.98)
+      tmp1 = 382.4;
+    else if (FT1 <= 1390.52)
+      tmp1 = 382.5;
+    else if (FT1 <= 1391.06)
+      tmp1 = 382.6;
+    else if (FT1 <= 1391.61)
+      tmp1 = 382.7;
+    else if (FT1 <= 1392.15)
+      tmp1 = 382.8;
+    else if (FT1 <= 1392.69)
+      tmp1 = 382.9;
+  } else if (FT1 <= 1398.11) {
+    if (FT1 == 1393.23)
+      tmp1 = 383;
+    else if (FT1 <= 1393.77)
+      tmp1 = 383.1;
+    else if (FT1 <= 1394.31)
+      tmp1 = 383.2;
+    else if (FT1 <= 1394.85)
+      tmp1 = 383.3;
+    else if (FT1 <= 1395.4)
+      tmp1 = 383.4;
+    else if (FT1 <= 1395.94)
+      tmp1 = 383.5;
+    else if (FT1 <= 1396.48)
+      tmp1 = 383.6;
+    else if (FT1 <= 1397.02)
+      tmp1 = 383.7;
+    else if (FT1 <= 1397.56)
+      tmp1 = 383.8;
+    else if (FT1 <= 1398.11)
+      tmp1 = 383.9;
+  } else if (FT1 <= 1403.53) {
+    if (FT1 == 1398.65)
+      tmp1 = 384;
+    else if (FT1 <= 1399.19)
+      tmp1 = 384.1;
+    else if (FT1 <= 1399.73)
+      tmp1 = 384.2;
+    else if (FT1 <= 1400.27)
+      tmp1 = 384.3;
+    else if (FT1 <= 1400.82)
+      tmp1 = 384.4;
+    else if (FT1 <= 1401.36)
+      tmp1 = 384.5;
+    else if (FT1 <= 1401.9)
+      tmp1 = 384.6;
+    else if (FT1 <= 1402.44)
+      tmp1 = 384.7;
+    else if (FT1 <= 1402.99)
+      tmp1 = 384.8;
+    else if (FT1 <= 1403.53)
+      tmp1 = 384.9;
+  } else if (FT1 <= 1408.96) {
+    if (FT1 == 1404.07)
+      tmp1 = 385;
+    else if (FT1 <= 1404.62)
+      tmp1 = 385.1;
+    else if (FT1 <= 1405.16)
+      tmp1 = 385.2;
+    else if (FT1 <= 1405.7)
+      tmp1 = 385.3;
+    else if (FT1 <= 1406.24)
+      tmp1 = 385.4;
+    else if (FT1 <= 1406.79)
+      tmp1 = 385.5;
+    else if (FT1 <= 1407.33)
+      tmp1 = 385.6;
+    else if (FT1 <= 1407.87)
+      tmp1 = 385.7;
+    else if (FT1 <= 1408.42)
+      tmp1 = 385.8;
+    else if (FT1 <= 1408.96)
+      tmp1 = 385.9;
+  } else if (FT1 <= 1414.4) {
+    if (FT1 == 1409.5)
+      tmp1 = 386;
+    else if (FT1 <= 1410.05)
+      tmp1 = 386.1;
+    else if (FT1 <= 1410.59)
+      tmp1 = 386.2;
+    else if (FT1 <= 1411.14)
+      tmp1 = 386.3;
+    else if (FT1 <= 1411.68)
+      tmp1 = 386.4;
+    else if (FT1 <= 1412.22)
+      tmp1 = 386.5;
+    else if (FT1 <= 1412.77)
+      tmp1 = 386.6;
+    else if (FT1 <= 1413.31)
+      tmp1 = 386.7;
+    else if (FT1 <= 1413.85)
+      tmp1 = 386.8;
+    else if (FT1 <= 1414.4)
+      tmp1 = 386.9;
+  } else if (FT1 <= 1419.84) {
+    if (FT1 == 1414.94)
+      tmp1 = 387;
+    else if (FT1 <= 1415.49)
+      tmp1 = 387.1;
+    else if (FT1 <= 1416.03)
+      tmp1 = 387.2;
+    else if (FT1 <= 1416.58)
+      tmp1 = 387.3;
+    else if (FT1 <= 1417.12)
+      tmp1 = 387.4;
+    else if (FT1 <= 1417.66)
+      tmp1 = 387.5;
+    else if (FT1 <= 1418.21)
+      tmp1 = 387.6;
+    else if (FT1 <= 1418.75)
+      tmp1 = 387.7;
+    else if (FT1 <= 1419.3)
+      tmp1 = 387.8;
+    else if (FT1 <= 1419.84)
+      tmp1 = 387.9;
+  } else if (FT1 <= 1425.29) {
+    if (FT1 == 1420.39)
+      tmp1 = 388;
+    else if (FT1 <= 1420.93)
+      tmp1 = 388.1;
+    else if (FT1 <= 1421.48)
+      tmp1 = 388.2;
+    else if (FT1 <= 1422.02)
+      tmp1 = 388.3;
+    else if (FT1 <= 1422.57)
+      tmp1 = 388.4;
+    else if (FT1 <= 1423.11)
+      tmp1 = 388.5;
+    else if (FT1 <= 1423.66)
+      tmp1 = 388.6;
+    else if (FT1 <= 1424.2)
+      tmp1 = 388.7;
+    else if (FT1 <= 1424.75)
+      tmp1 = 388.8;
+    else if (FT1 <= 1425.29)
+      tmp1 = 388.9;
+  } else if (FT1 <= 1430.75) {
+    if (FT1 == 1425.84)
+      tmp1 = 389;
+    else if (FT1 <= 1426.39)
+      tmp1 = 389.1;
+    else if (FT1 <= 1426.93)
+      tmp1 = 389.2;
+    else if (FT1 <= 1427.48)
+      tmp1 = 389.3;
+    else if (FT1 <= 1428.02)
+      tmp1 = 389.4;
+    else if (FT1 <= 1428.57)
+      tmp1 = 389.5;
+    else if (FT1 <= 1429.11)
+      tmp1 = 389.6;
+    else if (FT1 <= 1429.66)
+      tmp1 = 389.7;
+    else if (FT1 <= 1430.21)
+      tmp1 = 389.8;
+    else if (FT1 <= 1430.75)
+      tmp1 = 389.9;
+  } else if (FT1 <= 1436.22) {
+    if (FT1 == 1431.3)
+      tmp1 = 390;
+    else if (FT1 <= 1431.84)
+      tmp1 = 390.1;
+    else if (FT1 <= 1432.39)
+      tmp1 = 390.2;
+    else if (FT1 <= 1432.94)
+      tmp1 = 390.3;
+    else if (FT1 <= 1433.48)
+      tmp1 = 390.4;
+    else if (FT1 <= 1434.03)
+      tmp1 = 390.5;
+    else if (FT1 <= 1434.58)
+      tmp1 = 390.6;
+    else if (FT1 <= 1435.12)
+      tmp1 = 390.7;
+    else if (FT1 <= 1435.67)
+      tmp1 = 390.8;
+    else if (FT1 <= 1436.22)
+      tmp1 = 390.9;
+  } else if (FT1 <= 1441.69) {
+    if (FT1 == 1436.76)
+      tmp1 = 391;
+    else if (FT1 <= 1437.31)
+      tmp1 = 391.1;
+    else if (FT1 <= 1437.86)
+      tmp1 = 391.2;
+    else if (FT1 <= 1438.4)
+      tmp1 = 391.3;
+    else if (FT1 <= 1438.95)
+      tmp1 = 391.4;
+    else if (FT1 <= 1439.5)
+      tmp1 = 391.5;
+    else if (FT1 <= 1440.05)
+      tmp1 = 391.6;
+    else if (FT1 <= 1440.59)
+      tmp1 = 391.7;
+    else if (FT1 <= 1441.14)
+      tmp1 = 391.8;
+    else if (FT1 <= 1441.69)
+      tmp1 = 391.9;
+  } else if (FT1 <= 1447.17) {
+    if (FT1 == 1442.24)
+      tmp1 = 392;
+    else if (FT1 <= 1442.78)
+      tmp1 = 392.1;
+    else if (FT1 <= 1443.33)
+      tmp1 = 392.2;
+    else if (FT1 <= 1443.88)
+      tmp1 = 392.3;
+    else if (FT1 <= 1444.43)
+      tmp1 = 392.4;
+    else if (FT1 <= 1444.97)
+      tmp1 = 392.5;
+    else if (FT1 <= 1445.52)
+      tmp1 = 392.6;
+    else if (FT1 <= 1446.07)
+      tmp1 = 392.7;
+    else if (FT1 <= 1446.62)
+      tmp1 = 392.8;
+    else if (FT1 <= 1447.17)
+      tmp1 = 392.9;
+  } else if (FT1 <= 1452.65) {
+    if (FT1 == 1447.71)
+      tmp1 = 393;
+    else if (FT1 <= 1448.26)
+      tmp1 = 393.1;
+    else if (FT1 <= 1448.81)
+      tmp1 = 393.2;
+    else if (FT1 <= 1449.36)
+      tmp1 = 393.3;
+    else if (FT1 <= 1449.91)
+      tmp1 = 393.4;
+    else if (FT1 <= 1450.46)
+      tmp1 = 393.5;
+    else if (FT1 <= 1451)
+      tmp1 = 393.6;
+    else if (FT1 <= 1451.55)
+      tmp1 = 393.7;
+    else if (FT1 <= 1452.1)
+      tmp1 = 393.8;
+    else if (FT1 <= 1452.65)
+      tmp1 = 393.9;
+  } else if (FT1 <= 1458.14) {
+    if (FT1 == 1453.2)
+      tmp1 = 394;
+    else if (FT1 <= 1453.75)
+      tmp1 = 394.1;
+    else if (FT1 <= 1454.3)
+      tmp1 = 394.2;
+    else if (FT1 <= 1454.85)
+      tmp1 = 394.3;
+    else if (FT1 <= 1455.39)
+      tmp1 = 394.4;
+    else if (FT1 <= 1455.94)
+      tmp1 = 394.5;
+    else if (FT1 <= 1456.49)
+      tmp1 = 394.6;
+    else if (FT1 <= 1457.04)
+      tmp1 = 394.7;
+    else if (FT1 <= 1457.59)
+      tmp1 = 394.8;
+    else if (FT1 <= 1458.14)
+      tmp1 = 394.9;
+  } else if (FT1 <= 1463.64) {
+    if (FT1 == 1458.69)
+      tmp1 = 395;
+    else if (FT1 <= 1459.24)
+      tmp1 = 395.1;
+    else if (FT1 <= 1459.79)
+      tmp1 = 395.2;
+    else if (FT1 <= 1460.34)
+      tmp1 = 395.3;
+    else if (FT1 <= 1460.89)
+      tmp1 = 395.4;
+    else if (FT1 <= 1461.44)
+      tmp1 = 395.5;
+    else if (FT1 <= 1461.99)
+      tmp1 = 395.6;
+    else if (FT1 <= 1462.54)
+      tmp1 = 395.7;
+    else if (FT1 <= 1463.09)
+      tmp1 = 395.8;
+    else if (FT1 <= 1463.64)
+      tmp1 = 395.9;
+  } else if (FT1 <= 1469.14) {
+    if (FT1 == 1464.19)
+      tmp1 = 396;
+    else if (FT1 <= 1464.74)
+      tmp1 = 396.1;
+    else if (FT1 <= 1465.29)
+      tmp1 = 396.2;
+    else if (FT1 <= 1465.84)
+      tmp1 = 396.3;
+    else if (FT1 <= 1466.39)
+      tmp1 = 396.4;
+    else if (FT1 <= 1466.94)
+      tmp1 = 396.5;
+    else if (FT1 <= 1467.49)
+      tmp1 = 396.6;
+    else if (FT1 <= 1468.04)
+      tmp1 = 396.7;
+    else if (FT1 <= 1468.59)
+      tmp1 = 396.8;
+    else if (FT1 <= 1469.14)
+      tmp1 = 396.9;
+  } else if (FT1 <= 1474.65) {
+    if (FT1 == 1469.69)
+      tmp1 = 397;
+    else if (FT1 <= 1470.24)
+      tmp1 = 397.1;
+    else if (FT1 <= 1470.79)
+      tmp1 = 397.2;
+    else if (FT1 <= 1471.35)
+      tmp1 = 397.3;
+    else if (FT1 <= 1471.9)
+      tmp1 = 397.4;
+    else if (FT1 <= 1472.45)
+      tmp1 = 397.5;
+    else if (FT1 <= 1473)
+      tmp1 = 397.6;
+    else if (FT1 <= 1473.55)
+      tmp1 = 397.7;
+    else if (FT1 <= 1474.1)
+      tmp1 = 397.8;
+    else if (FT1 <= 1474.65)
+      tmp1 = 397.9;
+  } else if (FT1 <= 1480.17) {
+    if (FT1 == 1475.2)
+      tmp1 = 398;
+    else if (FT1 <= 1475.76)
+      tmp1 = 398.1;
+    else if (FT1 <= 1476.31)
+      tmp1 = 398.2;
+    else if (FT1 <= 1476.86)
+      tmp1 = 398.3;
+    else if (FT1 <= 1477.41)
+      tmp1 = 398.4;
+    else if (FT1 <= 1477.96)
+      tmp1 = 398.5;
+    else if (FT1 <= 1478.51)
+      tmp1 = 398.6;
+    else if (FT1 <= 1479.07)
+      tmp1 = 398.7;
+    else if (FT1 <= 1479.62)
+      tmp1 = 398.8;
+    else if (FT1 <= 1480.17)
+      tmp1 = 398.9;
+  } else if (FT1 <= 1485.69) {
+    if (FT1 == 1480.72)
+      tmp1 = 399;
+    else if (FT1 <= 1481.27)
+      tmp1 = 399.1;
+    else if (FT1 <= 1481.83)
+      tmp1 = 399.2;
+    else if (FT1 <= 1482.38)
+      tmp1 = 399.3;
+    else if (FT1 <= 1482.93)
+      tmp1 = 399.4;
+    else if (FT1 <= 1483.48)
+      tmp1 = 399.5;
+    else if (FT1 <= 1484.04)
+      tmp1 = 399.6;
+    else if (FT1 <= 1484.59)
+      tmp1 = 399.7;
+    else if (FT1 <= 1485.14)
+      tmp1 = 399.8;
+    else if (FT1 <= 1485.69)
+      tmp1 = 399.9;
+  } else if (FT1 <= 1491.22) {
+    if (FT1 == 1486.25)
+      tmp1 = 400;
+    else if (FT1 <= 1486.8)
+      tmp1 = 400.1;
+    else if (FT1 <= 1487.35)
+      tmp1 = 400.2;
+    else if (FT1 <= 1487.9)
+      tmp1 = 400.3;
+    else if (FT1 <= 1488.46)
+      tmp1 = 400.4;
+    else if (FT1 <= 1489.01)
+      tmp1 = 400.5;
+    else if (FT1 <= 1489.56)
+      tmp1 = 400.6;
+    else if (FT1 <= 1490.12)
+      tmp1 = 400.7;
+    else if (FT1 <= 1490.67)
+      tmp1 = 400.8;
+    else if (FT1 <= 1491.22)
+      tmp1 = 400.9;
+  } else if (FT1 <= 1496.76) {
+    if (FT1 == 1491.78)
+      tmp1 = 401;
+    else if (FT1 <= 1492.33)
+      tmp1 = 401.1;
+    else if (FT1 <= 1492.88)
+      tmp1 = 401.2;
+    else if (FT1 <= 1493.44)
+      tmp1 = 401.3;
+    else if (FT1 <= 1493.99)
+      tmp1 = 401.4;
+    else if (FT1 <= 1494.54)
+      tmp1 = 401.5;
+    else if (FT1 <= 1495.1)
+      tmp1 = 401.6;
+    else if (FT1 <= 1495.65)
+      tmp1 = 401.7;
+    else if (FT1 <= 1496.21)
+      tmp1 = 401.8;
+    else if (FT1 <= 1496.76)
+      tmp1 = 401.9;
+  } else if (FT1 <= 1502.3) {
+    if (FT1 == 1497.31)
+      tmp1 = 402;
+    else if (FT1 <= 1497.87)
+      tmp1 = 402.1;
+    else if (FT1 <= 1498.42)
+      tmp1 = 402.2;
+    else if (FT1 <= 1498.98)
+      tmp1 = 402.3;
+    else if (FT1 <= 1499.53)
+      tmp1 = 402.4;
+    else if (FT1 <= 1500.09)
+      tmp1 = 402.5;
+    else if (FT1 <= 1500.64)
+      tmp1 = 402.6;
+    else if (FT1 <= 1501.19)
+      tmp1 = 402.7;
+    else if (FT1 <= 1501.75)
+      tmp1 = 402.8;
+    else if (FT1 <= 1502.3)
+      tmp1 = 402.9;
+  } else if (FT1 <= 1507.85) {
+    if (FT1 == 1502.86)
+      tmp1 = 403;
+    else if (FT1 <= 1503.41)
+      tmp1 = 403.1;
+    else if (FT1 <= 1503.97)
+      tmp1 = 403.2;
+    else if (FT1 <= 1504.52)
+      tmp1 = 403.3;
+    else if (FT1 <= 1505.08)
+      tmp1 = 403.4;
+    else if (FT1 <= 1505.63)
+      tmp1 = 403.5;
+    else if (FT1 <= 1506.19)
+      tmp1 = 403.6;
+    else if (FT1 <= 1506.74)
+      tmp1 = 403.7;
+    else if (FT1 <= 1507.3)
+      tmp1 = 403.8;
+    else if (FT1 <= 1507.85)
+      tmp1 = 403.9;
+  } else if (FT1 <= 1513.41) {
+    if (FT1 == 1508.41)
+      tmp1 = 404;
+    else if (FT1 <= 1508.96)
+      tmp1 = 404.1;
+    else if (FT1 <= 1509.52)
+      tmp1 = 404.2;
+    else if (FT1 <= 1510.07)
+      tmp1 = 404.3;
+    else if (FT1 <= 1510.63)
+      tmp1 = 404.4;
+    else if (FT1 <= 1511.18)
+      tmp1 = 404.5;
+    else if (FT1 <= 1511.74)
+      tmp1 = 404.6;
+    else if (FT1 <= 1512.3)
+      tmp1 = 404.7;
+    else if (FT1 <= 1512.85)
+      tmp1 = 404.8;
+    else if (FT1 <= 1513.41)
+      tmp1 = 404.9;
+  } else if (FT1 <= 1518.97) {
+    if (FT1 == 1513.96)
+      tmp1 = 405;
+    else if (FT1 <= 1514.52)
+      tmp1 = 405.1;
+    else if (FT1 <= 1515.08)
+      tmp1 = 405.2;
+    else if (FT1 <= 1515.63)
+      tmp1 = 405.3;
+    else if (FT1 <= 1516.19)
+      tmp1 = 405.4;
+    else if (FT1 <= 1516.74)
+      tmp1 = 405.5;
+    else if (FT1 <= 1517.3)
+      tmp1 = 405.6;
+    else if (FT1 <= 1517.86)
+      tmp1 = 405.7;
+    else if (FT1 <= 1518.41)
+      tmp1 = 405.8;
+    else if (FT1 <= 1518.97)
+      tmp1 = 405.9;
+  } else if (FT1 <= 1524.54) {
+    if (FT1 == 1519.53)
+      tmp1 = 406;
+    else if (FT1 <= 1520.08)
+      tmp1 = 406.1;
+    else if (FT1 <= 1520.64)
+      tmp1 = 406.2;
+    else if (FT1 <= 1521.2)
+      tmp1 = 406.3;
+    else if (FT1 <= 1521.75)
+      tmp1 = 406.4;
+    else if (FT1 <= 1522.31)
+      tmp1 = 406.5;
+    else if (FT1 <= 1522.87)
+      tmp1 = 406.6;
+    else if (FT1 <= 1523.42)
+      tmp1 = 406.7;
+    else if (FT1 <= 1523.98)
+      tmp1 = 406.8;
+    else if (FT1 <= 1524.54)
+      tmp1 = 406.9;
+  } else if (FT1 <= 1530.11) {
+    if (FT1 == 1525.1)
+      tmp1 = 407;
+    else if (FT1 <= 1525.65)
+      tmp1 = 407.1;
+    else if (FT1 <= 1526.21)
+      tmp1 = 407.2;
+    else if (FT1 <= 1526.77)
+      tmp1 = 407.3;
+    else if (FT1 <= 1527.32)
+      tmp1 = 407.4;
+    else if (FT1 <= 1527.88)
+      tmp1 = 407.5;
+    else if (FT1 <= 1528.44)
+      tmp1 = 407.6;
+    else if (FT1 <= 1529)
+      tmp1 = 407.7;
+    else if (FT1 <= 1529.56)
+      tmp1 = 407.8;
+    else if (FT1 <= 1530.11)
+      tmp1 = 407.9;
+  } else if (FT1 <= 1535.69) {
+    if (FT1 == 1530.67)
+      tmp1 = 408;
+    else if (FT1 <= 1531.23)
+      tmp1 = 408.1;
+    else if (FT1 <= 1531.79)
+      tmp1 = 408.2;
+    else if (FT1 <= 1532.34)
+      tmp1 = 408.3;
+    else if (FT1 <= 1532.9)
+      tmp1 = 408.4;
+    else if (FT1 <= 1533.46)
+      tmp1 = 408.5;
+    else if (FT1 <= 1534.02)
+      tmp1 = 408.6;
+    else if (FT1 <= 1534.58)
+      tmp1 = 408.7;
+    else if (FT1 <= 1535.14)
+      tmp1 = 408.8;
+    else if (FT1 <= 1535.69)
+      tmp1 = 408.9;
+  } else if (FT1 <= 1541.28) {
+    if (FT1 == 1536.25)
+      tmp1 = 409;
+    else if (FT1 <= 1536.81)
+      tmp1 = 409.1;
+    else if (FT1 <= 1537.37)
+      tmp1 = 409.2;
+    else if (FT1 <= 1537.93)
+      tmp1 = 409.3;
+    else if (FT1 <= 1538.49)
+      tmp1 = 409.4;
+    else if (FT1 <= 1539.05)
+      tmp1 = 409.5;
+    else if (FT1 <= 1539.6)
+      tmp1 = 409.6;
+    else if (FT1 <= 1540.16)
+      tmp1 = 409.7;
+    else if (FT1 <= 1540.72)
+      tmp1 = 409.8;
+    else if (FT1 <= 1541.28)
+      tmp1 = 409.9;
+  } else if (FT1 <= 1546.87) {
+    if (FT1 == 1541.84)
+      tmp1 = 410;
+    else if (FT1 <= 1542.4)
+      tmp1 = 410.1;
+    else if (FT1 <= 1542.96)
+      tmp1 = 410.2;
+    else if (FT1 <= 1543.52)
+      tmp1 = 410.3;
+    else if (FT1 <= 1544.08)
+      tmp1 = 410.4;
+    else if (FT1 <= 1544.64)
+      tmp1 = 410.5;
+    else if (FT1 <= 1545.2)
+      tmp1 = 410.6;
+    else if (FT1 <= 1545.76)
+      tmp1 = 410.7;
+    else if (FT1 <= 1546.32)
+      tmp1 = 410.8;
+    else if (FT1 <= 1546.87)
+      tmp1 = 410.9;
+  } else if (FT1 <= 1552.47) {
+    if (FT1 == 1547.43)
+      tmp1 = 411;
+    else if (FT1 <= 1547.99)
+      tmp1 = 411.1;
+    else if (FT1 <= 1548.55)
+      tmp1 = 411.2;
+    else if (FT1 <= 1549.11)
+      tmp1 = 411.3;
+    else if (FT1 <= 1549.67)
+      tmp1 = 411.4;
+    else if (FT1 <= 1550.23)
+      tmp1 = 411.5;
+    else if (FT1 <= 1550.79)
+      tmp1 = 411.6;
+    else if (FT1 <= 1551.35)
+      tmp1 = 411.7;
+    else if (FT1 <= 1551.91)
+      tmp1 = 411.8;
+    else if (FT1 <= 1552.47)
+      tmp1 = 411.9;
+  } else if (FT1 <= 1558.08) {
+    if (FT1 == 1553.04)
+      tmp1 = 412;
+    else if (FT1 <= 1553.6)
+      tmp1 = 412.1;
+    else if (FT1 <= 1554.16)
+      tmp1 = 412.2;
+    else if (FT1 <= 1554.72)
+      tmp1 = 412.3;
+    else if (FT1 <= 1555.28)
+      tmp1 = 412.4;
+    else if (FT1 <= 1555.84)
+      tmp1 = 412.5;
+    else if (FT1 <= 1556.4)
+      tmp1 = 412.6;
+    else if (FT1 <= 1556.96)
+      tmp1 = 412.7;
+    else if (FT1 <= 1557.52)
+      tmp1 = 412.8;
+    else if (FT1 <= 1558.08)
+      tmp1 = 412.9;
+  } else if (FT1 <= 1563.69) {
+    if (FT1 == 1558.64)
+      tmp1 = 413;
+    else if (FT1 <= 1559.2)
+      tmp1 = 413.1;
+    else if (FT1 <= 1559.76)
+      tmp1 = 413.2;
+    else if (FT1 <= 1560.33)
+      tmp1 = 413.3;
+    else if (FT1 <= 1560.89)
+      tmp1 = 413.4;
+    else if (FT1 <= 1561.45)
+      tmp1 = 413.5;
+    else if (FT1 <= 1562.01)
+      tmp1 = 413.6;
+    else if (FT1 <= 1562.57)
+      tmp1 = 413.7;
+    else if (FT1 <= 1563.13)
+      tmp1 = 413.8;
+    else if (FT1 <= 1563.69)
+      tmp1 = 413.9;
+  } else if (FT1 <= 1569.31) {
+    if (FT1 == 1564.25)
+      tmp1 = 414;
+    else if (FT1 <= 1564.82)
+      tmp1 = 414.1;
+    else if (FT1 <= 1565.38)
+      tmp1 = 414.2;
+    else if (FT1 <= 1565.94)
+      tmp1 = 414.3;
+    else if (FT1 <= 1566.5)
+      tmp1 = 414.4;
+    else if (FT1 <= 1567.06)
+      tmp1 = 414.5;
+    else if (FT1 <= 1567.63)
+      tmp1 = 414.6;
+    else if (FT1 <= 1568.19)
+      tmp1 = 414.7;
+    else if (FT1 <= 1568.75)
+      tmp1 = 414.8;
+    else if (FT1 <= 1569.31)
+      tmp1 = 414.9;
+  } else if (FT1 <= 1574.94) {
+    if (FT1 == 1569.87)
+      tmp1 = 415;
+    else if (FT1 <= 1570.44)
+      tmp1 = 415.1;
+    else if (FT1 <= 1571)
+      tmp1 = 415.2;
+    else if (FT1 <= 1571.56)
+      tmp1 = 415.3;
+    else if (FT1 <= 1572.12)
+      tmp1 = 415.4;
+    else if (FT1 <= 1572.69)
+      tmp1 = 415.5;
+    else if (FT1 <= 1573.25)
+      tmp1 = 415.6;
+    else if (FT1 <= 1573.81)
+      tmp1 = 415.7;
+    else if (FT1 <= 1574.37)
+      tmp1 = 415.8;
+    else if (FT1 <= 1574.94)
+      tmp1 = 415.9;
+  } else if (FT1 <= 1580.57) {
+    if (FT1 == 1575.5)
+      tmp1 = 416;
+    else if (FT1 <= 1576.06)
+      tmp1 = 416.1;
+    else if (FT1 <= 1576.62)
+      tmp1 = 416.2;
+    else if (FT1 <= 1577.19)
+      tmp1 = 416.3;
+    else if (FT1 <= 1577.75)
+      tmp1 = 416.4;
+    else if (FT1 <= 1578.31)
+      tmp1 = 416.5;
+    else if (FT1 <= 1578.88)
+      tmp1 = 416.6;
+    else if (FT1 <= 1579.44)
+      tmp1 = 416.7;
+    else if (FT1 <= 1580)
+      tmp1 = 416.8;
+    else if (FT1 <= 1580.57)
+      tmp1 = 416.9;
+  } else if (FT1 <= 1586.2) {
+    if (FT1 == 1581.13)
+      tmp1 = 417;
+    else if (FT1 <= 1581.69)
+      tmp1 = 417.1;
+    else if (FT1 <= 1582.26)
+      tmp1 = 417.2;
+    else if (FT1 <= 1582.82)
+      tmp1 = 417.3;
+    else if (FT1 <= 1583.38)
+      tmp1 = 417.4;
+    else if (FT1 <= 1583.95)
+      tmp1 = 417.5;
+    else if (FT1 <= 1584.51)
+      tmp1 = 417.6;
+    else if (FT1 <= 1585.08)
+      tmp1 = 417.7;
+    else if (FT1 <= 1585.64)
+      tmp1 = 417.8;
+    else if (FT1 <= 1586.2)
+      tmp1 = 417.9;
+  } else if (FT1 <= 1591.85) {
+    if (FT1 == 1586.77)
+      tmp1 = 418;
+    else if (FT1 <= 1587.33)
+      tmp1 = 418.1;
+    else if (FT1 <= 1587.9)
+      tmp1 = 418.2;
+    else if (FT1 <= 1588.46)
+      tmp1 = 418.3;
+    else if (FT1 <= 1589.02)
+      tmp1 = 418.4;
+    else if (FT1 <= 1589.59)
+      tmp1 = 418.5;
+    else if (FT1 <= 1590.15)
+      tmp1 = 418.6;
+    else if (FT1 <= 1590.72)
+      tmp1 = 418.7;
+    else if (FT1 <= 1591.28)
+      tmp1 = 418.8;
+    else if (FT1 <= 1591.85)
+      tmp1 = 418.9;
+  } else if (FT1 <= 1597.5) {
+    if (FT1 == 1592.41)
+      tmp1 = 419;
+    else if (FT1 <= 1592.98)
+      tmp1 = 419.1;
+    else if (FT1 <= 1593.54)
+      tmp1 = 419.2;
+    else if (FT1 <= 1594.11)
+      tmp1 = 419.3;
+    else if (FT1 <= 1594.67)
+      tmp1 = 419.4;
+    else if (FT1 <= 1595.24)
+      tmp1 = 419.5;
+    else if (FT1 <= 1595.8)
+      tmp1 = 419.6;
+    else if (FT1 <= 1596.37)
+      tmp1 = 419.7;
+    else if (FT1 <= 1596.93)
+      tmp1 = 419.8;
+    else if (FT1 <= 1597.5)
+      tmp1 = 419.9;
+  } else if (FT1 <= 1603.15) {
+    if (FT1 == 1598.06)
+      tmp1 = 420;
+    else if (FT1 <= 1598.63)
+      tmp1 = 420.1;
+    else if (FT1 <= 1599.19)
+      tmp1 = 420.2;
+    else if (FT1 <= 1599.76)
+      tmp1 = 420.3;
+    else if (FT1 <= 1600.32)
+      tmp1 = 420.4;
+    else if (FT1 <= 1600.89)
+      tmp1 = 420.5;
+    else if (FT1 <= 1601.45)
+      tmp1 = 420.6;
+    else if (FT1 <= 1602.02)
+      tmp1 = 420.7;
+    else if (FT1 <= 1602.59)
+      tmp1 = 420.8;
+    else if (FT1 <= 1603.15)
+      tmp1 = 420.9;
+  } else if (FT1 <= 1608.81) {
+    if (FT1 == 1603.72)
+      tmp1 = 421;
+    else if (FT1 <= 1604.28)
+      tmp1 = 421.1;
+    else if (FT1 <= 1604.85)
+      tmp1 = 421.2;
+    else if (FT1 <= 1605.42)
+      tmp1 = 421.3;
+    else if (FT1 <= 1605.98)
+      tmp1 = 421.4;
+    else if (FT1 <= 1606.55)
+      tmp1 = 421.5;
+    else if (FT1 <= 1607.11)
+      tmp1 = 421.6;
+    else if (FT1 <= 1607.68)
+      tmp1 = 421.7;
+    else if (FT1 <= 1608.25)
+      tmp1 = 421.8;
+    else if (FT1 <= 1608.81)
+      tmp1 = 421.9;
+  } else if (FT1 <= 1614.48) {
+    if (FT1 == 1609.38)
+      tmp1 = 422;
+    else if (FT1 <= 1609.95)
+      tmp1 = 422.1;
+    else if (FT1 <= 1610.51)
+      tmp1 = 422.2;
+    else if (FT1 <= 1611.08)
+      tmp1 = 422.3;
+    else if (FT1 <= 1611.65)
+      tmp1 = 422.4;
+    else if (FT1 <= 1612.21)
+      tmp1 = 422.5;
+    else if (FT1 <= 1612.78)
+      tmp1 = 422.6;
+    else if (FT1 <= 1613.35)
+      tmp1 = 422.7;
+    else if (FT1 <= 1613.91)
+      tmp1 = 422.8;
+    else if (FT1 <= 1614.48)
+      tmp1 = 422.9;
+  } else if (FT1 <= 1620.15) {
+    if (FT1 == 1615.05)
+      tmp1 = 423;
+    else if (FT1 <= 1615.61)
+      tmp1 = 423.1;
+    else if (FT1 <= 1616.18)
+      tmp1 = 423.2;
+    else if (FT1 <= 1616.75)
+      tmp1 = 423.3;
+    else if (FT1 <= 1617.32)
+      tmp1 = 423.4;
+    else if (FT1 <= 1617.88)
+      tmp1 = 423.5;
+    else if (FT1 <= 1618.45)
+      tmp1 = 423.6;
+    else if (FT1 <= 1619.02)
+      tmp1 = 423.7;
+    else if (FT1 <= 1619.59)
+      tmp1 = 423.8;
+    else if (FT1 <= 1620.15)
+      tmp1 = 423.9;
+  } else if (FT1 <= 1625.83) {
+    if (FT1 == 1620.72)
+      tmp1 = 424;
+    else if (FT1 <= 1621.29)
+      tmp1 = 424.1;
+    else if (FT1 <= 1621.86)
+      tmp1 = 424.2;
+    else if (FT1 <= 1622.42)
+      tmp1 = 424.3;
+    else if (FT1 <= 1622.99)
+      tmp1 = 424.4;
+    else if (FT1 <= 1623.56)
+      tmp1 = 424.5;
+    else if (FT1 <= 1624.13)
+      tmp1 = 424.6;
+    else if (FT1 <= 1624.7)
+      tmp1 = 424.7;
+    else if (FT1 <= 1625.26)
+      tmp1 = 424.8;
+    else if (FT1 <= 1625.83)
+      tmp1 = 424.9;
+  } else if (FT1 <= 1631.52) {
+    if (FT1 == 1626.4)
+      tmp1 = 425;
+    else if (FT1 <= 1626.97)
+      tmp1 = 425.1;
+    else if (FT1 <= 1627.54)
+      tmp1 = 425.2;
+    else if (FT1 <= 1628.11)
+      tmp1 = 425.3;
+    else if (FT1 <= 1628.67)
+      tmp1 = 425.4;
+    else if (FT1 <= 1629.24)
+      tmp1 = 425.5;
+    else if (FT1 <= 1629.81)
+      tmp1 = 425.6;
+    else if (FT1 <= 1630.38)
+      tmp1 = 425.7;
+    else if (FT1 <= 1630.95)
+      tmp1 = 425.8;
+    else if (FT1 <= 1631.52)
+      tmp1 = 425.9;
+  } else if (FT1 <= 1637.21) {
+    if (FT1 == 1632.09)
+      tmp1 = 426;
+    else if (FT1 <= 1632.66)
+      tmp1 = 426.1;
+    else if (FT1 <= 1633.23)
+      tmp1 = 426.2;
+    else if (FT1 <= 1633.79)
+      tmp1 = 426.3;
+    else if (FT1 <= 1634.36)
+      tmp1 = 426.4;
+    else if (FT1 <= 1634.93)
+      tmp1 = 426.5;
+    else if (FT1 <= 1635.5)
+      tmp1 = 426.6;
+    else if (FT1 <= 1636.07)
+      tmp1 = 426.7;
+    else if (FT1 <= 1636.64)
+      tmp1 = 426.8;
+    else if (FT1 <= 1637.21)
+      tmp1 = 426.9;
+  } else if (FT1 <= 1642.91) {
+    if (FT1 == 1637.78)
+      tmp1 = 427;
+    else if (FT1 <= 1638.35)
+      tmp1 = 427.1;
+    else if (FT1 <= 1638.92)
+      tmp1 = 427.2;
+    else if (FT1 <= 1639.49)
+      tmp1 = 427.3;
+    else if (FT1 <= 1640.06)
+      tmp1 = 427.4;
+    else if (FT1 <= 1640.63)
+      tmp1 = 427.5;
+    else if (FT1 <= 1641.2)
+      tmp1 = 427.6;
+    else if (FT1 <= 1641.77)
+      tmp1 = 427.7;
+    else if (FT1 <= 1642.34)
+      tmp1 = 427.8;
+    else if (FT1 <= 1642.91)
+      tmp1 = 427.9;
+  } else if (FT1 <= 1648.61) {
+    if (FT1 == 1643.48)
+      tmp1 = 428;
+    else if (FT1 <= 1644.05)
+      tmp1 = 428.1;
+    else if (FT1 <= 1644.62)
+      tmp1 = 428.2;
+    else if (FT1 <= 1645.19)
+      tmp1 = 428.3;
+    else if (FT1 <= 1645.76)
+      tmp1 = 428.4;
+    else if (FT1 <= 1646.33)
+      tmp1 = 428.5;
+    else if (FT1 <= 1646.9)
+      tmp1 = 428.6;
+    else if (FT1 <= 1647.47)
+      tmp1 = 428.7;
+    else if (FT1 <= 1648.04)
+      tmp1 = 428.8;
+    else if (FT1 <= 1648.61)
+      tmp1 = 428.9;
+  } else if (FT1 <= 1654.32) {
+    if (FT1 == 1649.18)
+      tmp1 = 429;
+    else if (FT1 <= 1649.75)
+      tmp1 = 429.1;
+    else if (FT1 <= 1650.32)
+      tmp1 = 429.2;
+    else if (FT1 <= 1650.89)
+      tmp1 = 429.3;
+    else if (FT1 <= 1651.46)
+      tmp1 = 429.4;
+    else if (FT1 <= 1652.04)
+      tmp1 = 429.5;
+    else if (FT1 <= 1652.61)
+      tmp1 = 429.6;
+    else if (FT1 <= 1653.18)
+      tmp1 = 429.7;
+    else if (FT1 <= 1653.75)
+      tmp1 = 429.8;
+    else if (FT1 <= 1654.32)
+      tmp1 = 429.9;
+  } else if (FT1 <= 1660.03) {
+    if (FT1 == 1654.89)
+      tmp1 = 430;
+    else if (FT1 <= 1655.46)
+      tmp1 = 430.1;
+    else if (FT1 <= 1656.03)
+      tmp1 = 430.2;
+    else if (FT1 <= 1656.6)
+      tmp1 = 430.3;
+    else if (FT1 <= 1657.18)
+      tmp1 = 430.4;
+    else if (FT1 <= 1657.75)
+      tmp1 = 430.5;
+    else if (FT1 <= 1658.32)
+      tmp1 = 430.6;
+    else if (FT1 <= 1658.89)
+      tmp1 = 430.7;
+    else if (FT1 <= 1659.46)
+      tmp1 = 430.8;
+    else if (FT1 <= 1660.03)
+      tmp1 = 430.9;
+  } else if (FT1 <= 1665.76) {
+    if (FT1 == 1660.61)
+      tmp1 = 431;
+    else if (FT1 <= 1661.18)
+      tmp1 = 431.1;
+    else if (FT1 <= 1661.75)
+      tmp1 = 431.2;
+    else if (FT1 <= 1662.32)
+      tmp1 = 431.3;
+    else if (FT1 <= 1662.89)
+      tmp1 = 431.4;
+    else if (FT1 <= 1663.47)
+      tmp1 = 431.5;
+    else if (FT1 <= 1664.04)
+      tmp1 = 431.6;
+    else if (FT1 <= 1664.61)
+      tmp1 = 431.7;
+    else if (FT1 <= 1665.18)
+      tmp1 = 431.8;
+    else if (FT1 <= 1665.76)
+      tmp1 = 431.9;
+  } else if (FT1 <= 1671.48) {
+    if (FT1 == 1666.33)
+      tmp1 = 432;
+    else if (FT1 <= 1666.9)
+      tmp1 = 432.1;
+    else if (FT1 <= 1667.47)
+      tmp1 = 432.2;
+    else if (FT1 <= 1668.05)
+      tmp1 = 432.3;
+    else if (FT1 <= 1668.62)
+      tmp1 = 432.4;
+    else if (FT1 <= 1669.19)
+      tmp1 = 432.5;
+    else if (FT1 <= 1669.76)
+      tmp1 = 432.6;
+    else if (FT1 <= 1670.34)
+      tmp1 = 432.7;
+    else if (FT1 <= 1670.91)
+      tmp1 = 432.8;
+    else if (FT1 <= 1671.48)
+      tmp1 = 432.9;
+  } else if (FT1 <= 1677.22) {
+    if (FT1 == 1672.06)
+      tmp1 = 433;
+    else if (FT1 <= 1672.63)
+      tmp1 = 433.1;
+    else if (FT1 <= 1673.2)
+      tmp1 = 433.2;
+    else if (FT1 <= 1673.77)
+      tmp1 = 433.3;
+    else if (FT1 <= 1674.35)
+      tmp1 = 433.4;
+    else if (FT1 <= 1674.92)
+      tmp1 = 433.5;
+    else if (FT1 <= 1675.49)
+      tmp1 = 433.6;
+    else if (FT1 <= 1676.07)
+      tmp1 = 433.7;
+    else if (FT1 <= 1676.64)
+      tmp1 = 433.8;
+    else if (FT1 <= 1677.22)
+      tmp1 = 433.9;
+  } else if (FT1 <= 1682.95) {
+    if (FT1 == 1677.79)
+      tmp1 = 434;
+    else if (FT1 <= 1678.36)
+      tmp1 = 434.1;
+    else if (FT1 <= 1678.94)
+      tmp1 = 434.2;
+    else if (FT1 <= 1679.51)
+      tmp1 = 434.3;
+    else if (FT1 <= 1680.08)
+      tmp1 = 434.4;
+    else if (FT1 <= 1680.66)
+      tmp1 = 434.5;
+    else if (FT1 <= 1681.23)
+      tmp1 = 434.6;
+    else if (FT1 <= 1681.81)
+      tmp1 = 434.7;
+    else if (FT1 <= 1682.38)
+      tmp1 = 434.8;
+    else if (FT1 <= 1682.95)
+      tmp1 = 434.9;
+  } else if (FT1 <= 1688.7) {
+    if (FT1 == 1683.53)
+      tmp1 = 435;
+    else if (FT1 <= 1684.1)
+      tmp1 = 435.1;
+    else if (FT1 <= 1684.68)
+      tmp1 = 435.2;
+    else if (FT1 <= 1685.25)
+      tmp1 = 435.3;
+    else if (FT1 <= 1685.83)
+      tmp1 = 435.4;
+    else if (FT1 <= 1686.4)
+      tmp1 = 435.5;
+    else if (FT1 <= 1686.97)
+      tmp1 = 435.6;
+    else if (FT1 <= 1687.55)
+      tmp1 = 435.7;
+    else if (FT1 <= 1688.12)
+      tmp1 = 435.8;
+    else if (FT1 <= 1688.7)
+      tmp1 = 435.9;
+  } else if (FT1 <= 1694.45) {
+    if (FT1 == 1689.27)
+      tmp1 = 436;
+    else if (FT1 <= 1689.85)
+      tmp1 = 436.1;
+    else if (FT1 <= 1690.42)
+      tmp1 = 436.2;
+    else if (FT1 <= 1691)
+      tmp1 = 436.3;
+    else if (FT1 <= 1691.57)
+      tmp1 = 436.4;
+    else if (FT1 <= 1692.15)
+      tmp1 = 436.5;
+    else if (FT1 <= 1692.72)
+      tmp1 = 436.6;
+    else if (FT1 <= 1693.3)
+      tmp1 = 436.7;
+    else if (FT1 <= 1693.87)
+      tmp1 = 436.8;
+    else if (FT1 <= 1694.45)
+      tmp1 = 436.9;
+  } else if (FT1 <= 1700.2) {
+    if (FT1 == 1695.02)
+      tmp1 = 437;
+    else if (FT1 <= 1695.6)
+      tmp1 = 437.1;
+    else if (FT1 <= 1696.17)
+      tmp1 = 437.2;
+    else if (FT1 <= 1696.75)
+      tmp1 = 437.3;
+    else if (FT1 <= 1697.33)
+      tmp1 = 437.4;
+    else if (FT1 <= 1697.9)
+      tmp1 = 437.5;
+    else if (FT1 <= 1698.48)
+      tmp1 = 437.6;
+    else if (FT1 <= 1699.05)
+      tmp1 = 437.7;
+    else if (FT1 <= 1699.63)
+      tmp1 = 437.8;
+    else if (FT1 <= 1700.2)
+      tmp1 = 437.9;
+  } else if (FT1 <= 1705.97) {
+    if (FT1 == 1700.78)
+      tmp1 = 438;
+    else if (FT1 <= 1701.36)
+      tmp1 = 438.1;
+    else if (FT1 <= 1701.93)
+      tmp1 = 438.2;
+    else if (FT1 <= 1702.51)
+      tmp1 = 438.3;
+    else if (FT1 <= 1703.08)
+      tmp1 = 438.4;
+    else if (FT1 <= 1703.66)
+      tmp1 = 438.5;
+    else if (FT1 <= 1704.24)
+      tmp1 = 438.6;
+    else if (FT1 <= 1704.81)
+      tmp1 = 438.7;
+    else if (FT1 <= 1705.39)
+      tmp1 = 438.8;
+    else if (FT1 <= 1705.97)
+      tmp1 = 438.9;
+  } else if (FT1 <= 1711.73) {
+    if (FT1 == 1706.54)
+      tmp1 = 439;
+    else if (FT1 <= 1707.12)
+      tmp1 = 439.1;
+    else if (FT1 <= 1707.7)
+      tmp1 = 439.2;
+    else if (FT1 <= 1708.27)
+      tmp1 = 439.3;
+    else if (FT1 <= 1708.85)
+      tmp1 = 439.4;
+    else if (FT1 <= 1709.43)
+      tmp1 = 439.5;
+    else if (FT1 <= 1710)
+      tmp1 = 439.6;
+    else if (FT1 <= 1710.58)
+      tmp1 = 439.7;
+    else if (FT1 <= 1711.16)
+      tmp1 = 439.8;
+    else if (FT1 <= 1711.73)
+      tmp1 = 439.9;
+  } else if (FT1 <= 1717.51) {
+    if (FT1 == 1712.31)
+      tmp1 = 440;
+    else if (FT1 <= 1712.89)
+      tmp1 = 440.1;
+    else if (FT1 <= 1713.46)
+      tmp1 = 440.2;
+    else if (FT1 <= 1714.04)
+      tmp1 = 440.3;
+    else if (FT1 <= 1714.62)
+      tmp1 = 440.4;
+    else if (FT1 <= 1715.2)
+      tmp1 = 440.5;
+    else if (FT1 <= 1715.77)
+      tmp1 = 440.6;
+    else if (FT1 <= 1716.35)
+      tmp1 = 440.7;
+    else if (FT1 <= 1716.93)
+      tmp1 = 440.8;
+    else if (FT1 <= 1717.51)
+      tmp1 = 440.9;
+  } else if (FT1 <= 1723.29) {
+    if (FT1 == 1718.08)
+      tmp1 = 441;
+    else if (FT1 <= 1718.66)
+      tmp1 = 441.1;
+    else if (FT1 <= 1719.24)
+      tmp1 = 441.2;
+    else if (FT1 <= 1719.82)
+      tmp1 = 441.3;
+    else if (FT1 <= 1720.4)
+      tmp1 = 441.4;
+    else if (FT1 <= 1720.97)
+      tmp1 = 441.5;
+    else if (FT1 <= 1721.55)
+      tmp1 = 441.6;
+    else if (FT1 <= 1722.13)
+      tmp1 = 441.7;
+    else if (FT1 <= 1722.71)
+      tmp1 = 441.8;
+    else if (FT1 <= 1723.29)
+      tmp1 = 441.9;
+  } else if (FT1 <= 1729.07) {
+    if (FT1 == 1723.86)
+      tmp1 = 442;
+    else if (FT1 <= 1724.44)
+      tmp1 = 442.1;
+    else if (FT1 <= 1725.02)
+      tmp1 = 442.2;
+    else if (FT1 <= 1725.6)
+      tmp1 = 442.3;
+    else if (FT1 <= 1726.18)
+      tmp1 = 442.4;
+    else if (FT1 <= 1726.76)
+      tmp1 = 442.5;
+    else if (FT1 <= 1727.33)
+      tmp1 = 442.6;
+    else if (FT1 <= 1727.91)
+      tmp1 = 442.7;
+    else if (FT1 <= 1728.49)
+      tmp1 = 442.8;
+    else if (FT1 <= 1729.07)
+      tmp1 = 442.9;
+  } else if (FT1 <= 1734.86) {
+    if (FT1 == 1729.65)
+      tmp1 = 443;
+    else if (FT1 <= 1730.23)
+      tmp1 = 443.1;
+    else if (FT1 <= 1730.81)
+      tmp1 = 443.2;
+    else if (FT1 <= 1731.39)
+      tmp1 = 443.3;
+    else if (FT1 <= 1731.96)
+      tmp1 = 443.4;
+    else if (FT1 <= 1732.54)
+      tmp1 = 443.5;
+    else if (FT1 <= 1733.12)
+      tmp1 = 443.6;
+    else if (FT1 <= 1733.7)
+      tmp1 = 443.7;
+    else if (FT1 <= 1734.28)
+      tmp1 = 443.8;
+    else if (FT1 <= 1734.86)
+      tmp1 = 443.9;
+  } else if (FT1 <= 1740.66) {
+    if (FT1 == 1735.44)
+      tmp1 = 444;
+    else if (FT1 <= 1736.02)
+      tmp1 = 444.1;
+    else if (FT1 <= 1736.6)
+      tmp1 = 444.2;
+    else if (FT1 <= 1737.18)
+      tmp1 = 444.3;
+    else if (FT1 <= 1737.76)
+      tmp1 = 444.4;
+    else if (FT1 <= 1738.34)
+      tmp1 = 444.5;
+    else if (FT1 <= 1738.92)
+      tmp1 = 444.6;
+    else if (FT1 <= 1739.5)
+      tmp1 = 444.7;
+    else if (FT1 <= 1740.08)
+      tmp1 = 444.8;
+    else if (FT1 <= 1740.66)
+      tmp1 = 444.9;
+  } else if (FT1 <= 1746.46) {
+    if (FT1 == 1741.24)
+      tmp1 = 445;
+    else if (FT1 <= 1741.82)
+      tmp1 = 445.1;
+    else if (FT1 <= 1742.4)
+      tmp1 = 445.2;
+    else if (FT1 <= 1742.98)
+      tmp1 = 445.3;
+    else if (FT1 <= 1743.56)
+      tmp1 = 445.4;
+    else if (FT1 <= 1744.14)
+      tmp1 = 445.5;
+    else if (FT1 <= 1744.72)
+      tmp1 = 445.6;
+    else if (FT1 <= 1745.3)
+      tmp1 = 445.7;
+    else if (FT1 <= 1745.88)
+      tmp1 = 445.8;
+    else if (FT1 <= 1746.46)
+      tmp1 = 445.9;
+  } else if (FT1 <= 1752.26) {
+    if (FT1 == 1747.04)
+      tmp1 = 446;
+    else if (FT1 <= 1747.62)
+      tmp1 = 446.1;
+    else if (FT1 <= 1748.2)
+      tmp1 = 446.2;
+    else if (FT1 <= 1748.78)
+      tmp1 = 446.3;
+    else if (FT1 <= 1749.36)
+      tmp1 = 446.4;
+    else if (FT1 <= 1749.94)
+      tmp1 = 446.5;
+    else if (FT1 <= 1750.52)
+      tmp1 = 446.6;
+    else if (FT1 <= 1751.1)
+      tmp1 = 446.7;
+    else if (FT1 <= 1751.68)
+      tmp1 = 446.8;
+    else if (FT1 <= 1752.26)
+      tmp1 = 446.9;
+  } else if (FT1 <= 1758.08) {
+    if (FT1 == 1752.85)
+      tmp1 = 447;
+    else if (FT1 <= 1753.43)
+      tmp1 = 447.1;
+    else if (FT1 <= 1754.01)
+      tmp1 = 447.2;
+    else if (FT1 <= 1754.59)
+      tmp1 = 447.3;
+    else if (FT1 <= 1755.17)
+      tmp1 = 447.4;
+    else if (FT1 <= 1755.75)
+      tmp1 = 447.5;
+    else if (FT1 <= 1756.33)
+      tmp1 = 447.6;
+    else if (FT1 <= 1756.91)
+      tmp1 = 447.7;
+    else if (FT1 <= 1757.5)
+      tmp1 = 447.8;
+    else if (FT1 <= 1758.08)
+      tmp1 = 447.9;
+  } else if (FT1 <= 1763.9) {
+    if (FT1 == 1758.66)
+      tmp1 = 448;
+    else if (FT1 <= 1759.24)
+      tmp1 = 448.1;
+    else if (FT1 <= 1759.82)
+      tmp1 = 448.2;
+    else if (FT1 <= 1760.4)
+      tmp1 = 448.3;
+    else if (FT1 <= 1760.99)
+      tmp1 = 448.4;
+    else if (FT1 <= 1761.57)
+      tmp1 = 448.5;
+    else if (FT1 <= 1762.15)
+      tmp1 = 448.6;
+    else if (FT1 <= 1762.73)
+      tmp1 = 448.7;
+    else if (FT1 <= 1763.31)
+      tmp1 = 448.8;
+    else if (FT1 <= 1763.9)
+      tmp1 = 448.9;
+  } else if (FT1 <= 1769.72) {
+    if (FT1 == 1764.48)
+      tmp1 = 449;
+    else if (FT1 <= 1765.06)
+      tmp1 = 449.1;
+    else if (FT1 <= 1765.64)
+      tmp1 = 449.2;
+    else if (FT1 <= 1766.23)
+      tmp1 = 449.3;
+    else if (FT1 <= 1766.81)
+      tmp1 = 449.4;
+    else if (FT1 <= 1767.39)
+      tmp1 = 449.5;
+    else if (FT1 <= 1767.97)
+      tmp1 = 449.6;
+    else if (FT1 <= 1768.55)
+      tmp1 = 449.7;
+    else if (FT1 <= 1769.14)
+      tmp1 = 449.8;
+    else if (FT1 <= 1769.72)
+      tmp1 = 449.9;
+  } else if (FT1 <= 1775.55) {
+    if (FT1 == 1770.3)
+      tmp1 = 450;
+    else if (FT1 <= 1770.89)
+      tmp1 = 450.1;
+    else if (FT1 <= 1771.47)
+      tmp1 = 450.2;
+    else if (FT1 <= 1772.05)
+      tmp1 = 450.3;
+    else if (FT1 <= 1772.63)
+      tmp1 = 450.4;
+    else if (FT1 <= 1773.22)
+      tmp1 = 450.5;
+    else if (FT1 <= 1773.8)
+      tmp1 = 450.6;
+    else if (FT1 <= 1774.38)
+      tmp1 = 450.7;
+    else if (FT1 <= 1774.97)
+      tmp1 = 450.8;
+    else if (FT1 <= 1775.55)
+      tmp1 = 450.9;
+  } else if (FT1 <= 1781.38) {
+    if (FT1 == 1776.13)
+      tmp1 = 451;
+    else if (FT1 <= 1776.72)
+      tmp1 = 451.1;
+    else if (FT1 <= 1777.3)
+      tmp1 = 451.2;
+    else if (FT1 <= 1777.88)
+      tmp1 = 451.3;
+    else if (FT1 <= 1778.47)
+      tmp1 = 451.4;
+    else if (FT1 <= 1779.05)
+      tmp1 = 451.5;
+    else if (FT1 <= 1779.63)
+      tmp1 = 451.6;
+    else if (FT1 <= 1780.22)
+      tmp1 = 451.7;
+    else if (FT1 <= 1780.8)
+      tmp1 = 451.8;
+    else if (FT1 <= 1781.38)
+      tmp1 = 451.9;
+  } else if (FT1 <= 1787.23) {
+    if (FT1 == 1781.97)
+      tmp1 = 452;
+    else if (FT1 <= 1782.55)
+      tmp1 = 452.1;
+    else if (FT1 <= 1783.14)
+      tmp1 = 452.2;
+    else if (FT1 <= 1783.72)
+      tmp1 = 452.3;
+    else if (FT1 <= 1784.3)
+      tmp1 = 452.4;
+    else if (FT1 <= 1784.89)
+      tmp1 = 452.5;
+    else if (FT1 <= 1785.47)
+      tmp1 = 452.6;
+    else if (FT1 <= 1786.06)
+      tmp1 = 452.7;
+    else if (FT1 <= 1786.64)
+      tmp1 = 452.8;
+    else if (FT1 <= 1787.23)
+      tmp1 = 452.9;
+  } else if (FT1 <= 1793.07) {
+    if (FT1 == 1787.81)
+      tmp1 = 453;
+    else if (FT1 <= 1788.39)
+      tmp1 = 453.1;
+    else if (FT1 <= 1788.98)
+      tmp1 = 453.2;
+    else if (FT1 <= 1789.56)
+      tmp1 = 453.3;
+    else if (FT1 <= 1790.15)
+      tmp1 = 453.4;
+    else if (FT1 <= 1790.73)
+      tmp1 = 453.5;
+    else if (FT1 <= 1791.32)
+      tmp1 = 453.6;
+    else if (FT1 <= 1791.9)
+      tmp1 = 453.7;
+    else if (FT1 <= 1792.49)
+      tmp1 = 453.8;
+    else if (FT1 <= 1793.07)
+      tmp1 = 453.9;
+  } else if (FT1 <= 1798.92) {
+    if (FT1 == 1793.66)
+      tmp1 = 454;
+    else if (FT1 <= 1794.24)
+      tmp1 = 454.1;
+    else if (FT1 <= 1794.83)
+      tmp1 = 454.2;
+    else if (FT1 <= 1795.41)
+      tmp1 = 454.3;
+    else if (FT1 <= 1796)
+      tmp1 = 454.4;
+    else if (FT1 <= 1796.58)
+      tmp1 = 454.5;
+    else if (FT1 <= 1797.17)
+      tmp1 = 454.6;
+    else if (FT1 <= 1797.75)
+      tmp1 = 454.7;
+    else if (FT1 <= 1798.34)
+      tmp1 = 454.8;
+    else if (FT1 <= 1798.92)
+      tmp1 = 454.9;
+  } else if (FT1 <= 1804.78) {
+    if (FT1 == 1799.51)
+      tmp1 = 455;
+    else if (FT1 <= 1800.09)
+      tmp1 = 455.1;
+    else if (FT1 <= 1800.68)
+      tmp1 = 455.2;
+    else if (FT1 <= 1801.27)
+      tmp1 = 455.3;
+    else if (FT1 <= 1801.85)
+      tmp1 = 455.4;
+    else if (FT1 <= 1802.44)
+      tmp1 = 455.5;
+    else if (FT1 <= 1803.02)
+      tmp1 = 455.6;
+    else if (FT1 <= 1803.61)
+      tmp1 = 455.7;
+    else if (FT1 <= 1804.19)
+      tmp1 = 455.8;
+    else if (FT1 <= 1804.78)
+      tmp1 = 455.9;
+  } else if (FT1 <= 1810.64) {
+    if (FT1 == 1805.37)
+      tmp1 = 456;
+    else if (FT1 <= 1805.95)
+      tmp1 = 456.1;
+    else if (FT1 <= 1806.54)
+      tmp1 = 456.2;
+    else if (FT1 <= 1807.12)
+      tmp1 = 456.3;
+    else if (FT1 <= 1807.71)
+      tmp1 = 456.4;
+    else if (FT1 <= 1808.3)
+      tmp1 = 456.5;
+    else if (FT1 <= 1808.88)
+      tmp1 = 456.6;
+    else if (FT1 <= 1809.47)
+      tmp1 = 456.7;
+    else if (FT1 <= 1810.06)
+      tmp1 = 456.8;
+    else if (FT1 <= 1810.64)
+      tmp1 = 456.9;
+  } else if (FT1 <= 1816.51) {
+    if (FT1 == 1811.23)
+      tmp1 = 457;
+    else if (FT1 <= 1811.82)
+      tmp1 = 457.1;
+    else if (FT1 <= 1812.4)
+      tmp1 = 457.2;
+    else if (FT1 <= 1812.99)
+      tmp1 = 457.3;
+    else if (FT1 <= 1813.58)
+      tmp1 = 457.4;
+    else if (FT1 <= 1814.16)
+      tmp1 = 457.5;
+    else if (FT1 <= 1814.75)
+      tmp1 = 457.6;
+    else if (FT1 <= 1815.34)
+      tmp1 = 457.7;
+    else if (FT1 <= 1815.92)
+      tmp1 = 457.8;
+    else if (FT1 <= 1816.51)
+      tmp1 = 457.9;
+  } else if (FT1 <= 1822.38) {
+    if (FT1 == 1817.1)
+      tmp1 = 458;
+    else if (FT1 <= 1817.69)
+      tmp1 = 458.1;
+    else if (FT1 <= 1818.27)
+      tmp1 = 458.2;
+    else if (FT1 <= 1818.86)
+      tmp1 = 458.3;
+    else if (FT1 <= 1819.45)
+      tmp1 = 458.4;
+    else if (FT1 <= 1820.03)
+      tmp1 = 458.5;
+    else if (FT1 <= 1820.62)
+      tmp1 = 458.6;
+    else if (FT1 <= 1821.21)
+      tmp1 = 458.7;
+    else if (FT1 <= 1821.8)
+      tmp1 = 458.8;
+    else if (FT1 <= 1822.38)
+      tmp1 = 458.9;
+  } else if (FT1 <= 1828.26) {
+    if (FT1 == 1822.97)
+      tmp1 = 459;
+    else if (FT1 <= 1823.56)
+      tmp1 = 459.1;
+    else if (FT1 <= 1824.15)
+      tmp1 = 459.2;
+    else if (FT1 <= 1824.74)
+      tmp1 = 459.3;
+    else if (FT1 <= 1825.32)
+      tmp1 = 459.4;
+    else if (FT1 <= 1825.91)
+      tmp1 = 459.5;
+    else if (FT1 <= 1826.5)
+      tmp1 = 459.6;
+    else if (FT1 <= 1827.09)
+      tmp1 = 459.7;
+    else if (FT1 <= 1827.68)
+      tmp1 = 459.8;
+    else if (FT1 <= 1828.26)
+      tmp1 = 459.9;
+  } else if (FT1 <= 1834.15) {
+    if (FT1 == 1828.85)
+      tmp1 = 460;
+    else if (FT1 <= 1829.44)
+      tmp1 = 460.1;
+    else if (FT1 <= 1830.03)
+      tmp1 = 460.2;
+    else if (FT1 <= 1830.62)
+      tmp1 = 460.3;
+    else if (FT1 <= 1831.2)
+      tmp1 = 460.4;
+    else if (FT1 <= 1831.79)
+      tmp1 = 460.5;
+    else if (FT1 <= 1832.38)
+      tmp1 = 460.6;
+    else if (FT1 <= 1832.97)
+      tmp1 = 460.7;
+    else if (FT1 <= 1833.56)
+      tmp1 = 460.8;
+    else if (FT1 <= 1834.15)
+      tmp1 = 460.9;
+  } else if (FT1 <= 1840.04) {
+    if (FT1 == 1834.74)
+      tmp1 = 461;
+    else if (FT1 <= 1835.33)
+      tmp1 = 461.1;
+    else if (FT1 <= 1835.91)
+      tmp1 = 461.2;
+    else if (FT1 <= 1836.5)
+      tmp1 = 461.3;
+    else if (FT1 <= 1837.09)
+      tmp1 = 461.4;
+    else if (FT1 <= 1837.68)
+      tmp1 = 461.5;
+    else if (FT1 <= 1838.27)
+      tmp1 = 461.6;
+    else if (FT1 <= 1838.86)
+      tmp1 = 461.7;
+    else if (FT1 <= 1839.45)
+      tmp1 = 461.8;
+    else if (FT1 <= 1840.04)
+      tmp1 = 461.9;
+  } else if (FT1 <= 1845.93) {
+    if (FT1 == 1840.63)
+      tmp1 = 462;
+    else if (FT1 <= 1841.22)
+      tmp1 = 462.1;
+    else if (FT1 <= 1841.81)
+      tmp1 = 462.2;
+    else if (FT1 <= 1842.39)
+      tmp1 = 462.3;
+    else if (FT1 <= 1842.98)
+      tmp1 = 462.4;
+    else if (FT1 <= 1843.57)
+      tmp1 = 462.5;
+    else if (FT1 <= 1844.16)
+      tmp1 = 462.6;
+    else if (FT1 <= 1844.75)
+      tmp1 = 462.7;
+    else if (FT1 <= 1845.34)
+      tmp1 = 462.8;
+    else if (FT1 <= 1845.93)
+      tmp1 = 462.9;
+  } else if (FT1 <= 1851.83) {
+    if (FT1 == 1846.52)
+      tmp1 = 463;
+    else if (FT1 <= 1847.11)
+      tmp1 = 463.1;
+    else if (FT1 <= 1847.7)
+      tmp1 = 463.2;
+    else if (FT1 <= 1848.29)
+      tmp1 = 463.3;
+    else if (FT1 <= 1848.88)
+      tmp1 = 463.4;
+    else if (FT1 <= 1849.47)
+      tmp1 = 463.5;
+    else if (FT1 <= 1850.06)
+      tmp1 = 463.6;
+    else if (FT1 <= 1850.65)
+      tmp1 = 463.7;
+    else if (FT1 <= 1851.24)
+      tmp1 = 463.8;
+    else if (FT1 <= 1851.83)
+      tmp1 = 463.9;
+  } else if (FT1 <= 1857.74) {
+    if (FT1 == 1852.42)
+      tmp1 = 464;
+    else if (FT1 <= 1853.01)
+      tmp1 = 464.1;
+    else if (FT1 <= 1853.6)
+      tmp1 = 464.2;
+    else if (FT1 <= 1854.19)
+      tmp1 = 464.3;
+    else if (FT1 <= 1854.78)
+      tmp1 = 464.4;
+    else if (FT1 <= 1855.38)
+      tmp1 = 464.5;
+    else if (FT1 <= 1855.97)
+      tmp1 = 464.6;
+    else if (FT1 <= 1856.56)
+      tmp1 = 464.7;
+    else if (FT1 <= 1857.15)
+      tmp1 = 464.8;
+    else if (FT1 <= 1857.74)
+      tmp1 = 464.9;
+  } else if (FT1 <= 1863.65) {
+    if (FT1 == 1858.33)
+      tmp1 = 465;
+    else if (FT1 <= 1858.92)
+      tmp1 = 465.1;
+    else if (FT1 <= 1859.51)
+      tmp1 = 465.2;
+    else if (FT1 <= 1860.1)
+      tmp1 = 465.3;
+    else if (FT1 <= 1860.69)
+      tmp1 = 465.4;
+    else if (FT1 <= 1861.28)
+      tmp1 = 465.5;
+    else if (FT1 <= 1861.88)
+      tmp1 = 465.6;
+    else if (FT1 <= 1862.47)
+      tmp1 = 465.7;
+    else if (FT1 <= 1863.06)
+      tmp1 = 465.8;
+    else if (FT1 <= 1863.65)
+      tmp1 = 465.9;
+  } else if (FT1 <= 1869.57) {
+    if (FT1 == 1864.24)
+      tmp1 = 466;
+    else if (FT1 <= 1864.83)
+      tmp1 = 466.1;
+    else if (FT1 <= 1865.42)
+      tmp1 = 466.2;
+    else if (FT1 <= 1866.02)
+      tmp1 = 466.3;
+    else if (FT1 <= 1866.61)
+      tmp1 = 466.4;
+    else if (FT1 <= 1867.2)
+      tmp1 = 466.5;
+    else if (FT1 <= 1867.79)
+      tmp1 = 466.6;
+    else if (FT1 <= 1868.38)
+      tmp1 = 466.7;
+    else if (FT1 <= 1868.97)
+      tmp1 = 466.8;
+    else if (FT1 <= 1869.57)
+      tmp1 = 466.9;
+  } else if (FT1 <= 1875.49) {
+    if (FT1 == 1870.16)
+      tmp1 = 467;
+    else if (FT1 <= 1870.75)
+      tmp1 = 467.1;
+    else if (FT1 <= 1871.34)
+      tmp1 = 467.2;
+    else if (FT1 <= 1871.93)
+      tmp1 = 467.3;
+    else if (FT1 <= 1872.53)
+      tmp1 = 467.4;
+    else if (FT1 <= 1873.12)
+      tmp1 = 467.5;
+    else if (FT1 <= 1873.71)
+      tmp1 = 467.6;
+    else if (FT1 <= 1874.3)
+      tmp1 = 467.7;
+    else if (FT1 <= 1874.89)
+      tmp1 = 467.8;
+    else if (FT1 <= 1875.49)
+      tmp1 = 467.9;
+  } else if (FT1 <= 1881.41) {
+    if (FT1 == 1876.08)
+      tmp1 = 468;
+    else if (FT1 <= 1876.67)
+      tmp1 = 468.1;
+    else if (FT1 <= 1877.26)
+      tmp1 = 468.2;
+    else if (FT1 <= 1877.86)
+      tmp1 = 468.3;
+    else if (FT1 <= 1878.45)
+      tmp1 = 468.4;
+    else if (FT1 <= 1879.04)
+      tmp1 = 468.5;
+    else if (FT1 <= 1879.64)
+      tmp1 = 468.6;
+    else if (FT1 <= 1880.23)
+      tmp1 = 468.7;
+    else if (FT1 <= 1880.82)
+      tmp1 = 468.8;
+    else if (FT1 <= 1881.41)
+      tmp1 = 468.9;
+  } else if (FT1 <= 1887.35) {
+    if (FT1 == 1882.01)
+      tmp1 = 469;
+    else if (FT1 <= 1882.6)
+      tmp1 = 469.1;
+    else if (FT1 <= 1883.19)
+      tmp1 = 469.2;
+    else if (FT1 <= 1883.79)
+      tmp1 = 469.3;
+    else if (FT1 <= 1884.38)
+      tmp1 = 469.4;
+    else if (FT1 <= 1884.97)
+      tmp1 = 469.5;
+    else if (FT1 <= 1885.57)
+      tmp1 = 469.6;
+    else if (FT1 <= 1886.16)
+      tmp1 = 469.7;
+    else if (FT1 <= 1886.75)
+      tmp1 = 469.8;
+    else if (FT1 <= 1887.35)
+      tmp1 = 469.9;
+  } else if (FT1 <= 1893.28) {
+    if (FT1 == 1887.94)
+      tmp1 = 470;
+    else if (FT1 <= 1888.53)
+      tmp1 = 470.1;
+    else if (FT1 <= 1889.13)
+      tmp1 = 470.2;
+    else if (FT1 <= 1889.72)
+      tmp1 = 470.3;
+    else if (FT1 <= 1890.31)
+      tmp1 = 470.4;
+    else if (FT1 <= 1890.91)
+      tmp1 = 470.5;
+    else if (FT1 <= 1891.5)
+      tmp1 = 470.6;
+    else if (FT1 <= 1892.1)
+      tmp1 = 470.7;
+    else if (FT1 <= 1892.69)
+      tmp1 = 470.8;
+    else if (FT1 <= 1893.28)
+      tmp1 = 470.9;
+  } else if (FT1 <= 1899.23) {
+    if (FT1 == 1893.88)
+      tmp1 = 471;
+    else if (FT1 <= 1894.47)
+      tmp1 = 471.1;
+    else if (FT1 <= 1895.07)
+      tmp1 = 471.2;
+    else if (FT1 <= 1895.66)
+      tmp1 = 471.3;
+    else if (FT1 <= 1896.25)
+      tmp1 = 471.4;
+    else if (FT1 <= 1896.85)
+      tmp1 = 471.5;
+    else if (FT1 <= 1897.44)
+      tmp1 = 471.6;
+    else if (FT1 <= 1898.04)
+      tmp1 = 471.7;
+    else if (FT1 <= 1898.63)
+      tmp1 = 471.8;
+    else if (FT1 <= 1899.23)
+      tmp1 = 471.9;
+  } else if (FT1 <= 1905.17) {
+    if (FT1 == 1899.82)
+      tmp1 = 472;
+    else if (FT1 <= 1900.42)
+      tmp1 = 472.1;
+    else if (FT1 <= 1901.01)
+      tmp1 = 472.2;
+    else if (FT1 <= 1901.6)
+      tmp1 = 472.3;
+    else if (FT1 <= 1902.2)
+      tmp1 = 472.4;
+    else if (FT1 <= 1902.79)
+      tmp1 = 472.5;
+    else if (FT1 <= 1903.39)
+      tmp1 = 472.6;
+    else if (FT1 <= 1903.98)
+      tmp1 = 472.7;
+    else if (FT1 <= 1904.58)
+      tmp1 = 472.8;
+    else if (FT1 <= 1905.17)
+      tmp1 = 472.9;
+  } else if (FT1 <= 1911.13) {
+    if (FT1 == 1905.77)
+      tmp1 = 473;
+    else if (FT1 <= 1906.36)
+      tmp1 = 473.1;
+    else if (FT1 <= 1906.96)
+      tmp1 = 473.2;
+    else if (FT1 <= 1907.55)
+      tmp1 = 473.3;
+    else if (FT1 <= 1908.15)
+      tmp1 = 473.4;
+    else if (FT1 <= 1908.75)
+      tmp1 = 473.5;
+    else if (FT1 <= 1909.34)
+      tmp1 = 473.6;
+    else if (FT1 <= 1909.94)
+      tmp1 = 473.7;
+    else if (FT1 <= 1910.53)
+      tmp1 = 473.8;
+    else if (FT1 <= 1911.13)
+      tmp1 = 473.9;
+  } else if (FT1 <= 1917.09) {
+    if (FT1 == 1911.72)
+      tmp1 = 474;
+    else if (FT1 <= 1912.32)
+      tmp1 = 474.1;
+    else if (FT1 <= 1912.91)
+      tmp1 = 474.2;
+    else if (FT1 <= 1913.51)
+      tmp1 = 474.3;
+    else if (FT1 <= 1914.11)
+      tmp1 = 474.4;
+    else if (FT1 <= 1914.7)
+      tmp1 = 474.5;
+    else if (FT1 <= 1915.3)
+      tmp1 = 474.6;
+    else if (FT1 <= 1915.89)
+      tmp1 = 474.7;
+    else if (FT1 <= 1916.49)
+      tmp1 = 474.8;
+    else if (FT1 <= 1917.09)
+      tmp1 = 474.9;
+  } else if (FT1 <= 1923.05) {
+    if (FT1 == 1917.68)
+      tmp1 = 475;
+    else if (FT1 <= 1918.28)
+      tmp1 = 475.1;
+    else if (FT1 <= 1918.87)
+      tmp1 = 475.2;
+    else if (FT1 <= 1919.47)
+      tmp1 = 475.3;
+    else if (FT1 <= 1920.07)
+      tmp1 = 475.4;
+    else if (FT1 <= 1920.66)
+      tmp1 = 475.5;
+    else if (FT1 <= 1921.26)
+      tmp1 = 475.6;
+    else if (FT1 <= 1921.86)
+      tmp1 = 475.7;
+    else if (FT1 <= 1922.45)
+      tmp1 = 475.8;
+    else if (FT1 <= 1923.05)
+      tmp1 = 475.9;
+  } else if (FT1 <= 1929.02) {
+    if (FT1 == 1923.65)
+      tmp1 = 476;
+    else if (FT1 <= 1924.24)
+      tmp1 = 476.1;
+    else if (FT1 <= 1924.84)
+      tmp1 = 476.2;
+    else if (FT1 <= 1925.44)
+      tmp1 = 476.3;
+    else if (FT1 <= 1926.03)
+      tmp1 = 476.4;
+    else if (FT1 <= 1926.63)
+      tmp1 = 476.5;
+    else if (FT1 <= 1927.23)
+      tmp1 = 476.6;
+    else if (FT1 <= 1927.82)
+      tmp1 = 476.7;
+    else if (FT1 <= 1928.42)
+      tmp1 = 476.8;
+    else if (FT1 <= 1929.02)
+      tmp1 = 476.9;
+  } else if (FT1 <= 1934.99) {
+    if (FT1 == 1929.61)
+      tmp1 = 477;
+    else if (FT1 <= 1930.21)
+      tmp1 = 477.1;
+    else if (FT1 <= 1930.81)
+      tmp1 = 477.2;
+    else if (FT1 <= 1931.41)
+      tmp1 = 477.3;
+    else if (FT1 <= 1932)
+      tmp1 = 477.4;
+    else if (FT1 <= 1932.6)
+      tmp1 = 477.5;
+    else if (FT1 <= 1933.2)
+      tmp1 = 477.6;
+    else if (FT1 <= 1933.8)
+      tmp1 = 477.7;
+    else if (FT1 <= 1934.39)
+      tmp1 = 477.8;
+    else if (FT1 <= 1934.99)
+      tmp1 = 477.9;
+  } else if (FT1 <= 1940.97) {
+    if (FT1 == 1935.59)
+      tmp1 = 478;
+    else if (FT1 <= 1936.19)
+      tmp1 = 478.1;
+    else if (FT1 <= 1936.78)
+      tmp1 = 478.2;
+    else if (FT1 <= 1937.38)
+      tmp1 = 478.3;
+    else if (FT1 <= 1937.98)
+      tmp1 = 478.4;
+    else if (FT1 <= 1938.58)
+      tmp1 = 478.5;
+    else if (FT1 <= 1939.18)
+      tmp1 = 478.6;
+    else if (FT1 <= 1939.77)
+      tmp1 = 478.7;
+    else if (FT1 <= 1940.37)
+      tmp1 = 478.8;
+    else if (FT1 <= 1940.97)
+      tmp1 = 478.9;
+  } else if (FT1 <= 1946.95) {
+    if (FT1 == 1941.57)
+      tmp1 = 479;
+    else if (FT1 <= 1942.17)
+      tmp1 = 479.1;
+    else if (FT1 <= 1942.76)
+      tmp1 = 479.2;
+    else if (FT1 <= 1943.36)
+      tmp1 = 479.3;
+    else if (FT1 <= 1943.96)
+      tmp1 = 479.4;
+    else if (FT1 <= 1944.56)
+      tmp1 = 479.5;
+    else if (FT1 <= 1945.16)
+      tmp1 = 479.6;
+    else if (FT1 <= 1945.76)
+      tmp1 = 479.7;
+    else if (FT1 <= 1946.36)
+      tmp1 = 479.8;
+    else if (FT1 <= 1946.95)
+      tmp1 = 479.9;
+  } else if (FT1 <= 1952.94) {
+    if (FT1 == 1947.55)
+      tmp1 = 480;
+    else if (FT1 <= 1948.15)
+      tmp1 = 480.1;
+    else if (FT1 <= 1948.75)
+      tmp1 = 480.2;
+    else if (FT1 <= 1949.35)
+      tmp1 = 480.3;
+    else if (FT1 <= 1949.95)
+      tmp1 = 480.4;
+    else if (FT1 <= 1950.55)
+      tmp1 = 480.5;
+    else if (FT1 <= 1951.15)
+      tmp1 = 480.6;
+    else if (FT1 <= 1951.74)
+      tmp1 = 480.7;
+    else if (FT1 <= 1952.34)
+      tmp1 = 480.8;
+    else if (FT1 <= 1952.94)
+      tmp1 = 480.9;
+  } else if (FT1 <= 1958.94) {
+    if (FT1 == 1953.54)
+      tmp1 = 481;
+    else if (FT1 <= 1954.14)
+      tmp1 = 481.1;
+    else if (FT1 <= 1954.74)
+      tmp1 = 481.2;
+    else if (FT1 <= 1955.34)
+      tmp1 = 481.3;
+    else if (FT1 <= 1955.94)
+      tmp1 = 481.4;
+    else if (FT1 <= 1956.54)
+      tmp1 = 481.5;
+    else if (FT1 <= 1957.14)
+      tmp1 = 481.6;
+    else if (FT1 <= 1957.74)
+      tmp1 = 481.7;
+    else if (FT1 <= 1958.34)
+      tmp1 = 481.8;
+    else if (FT1 <= 1958.94)
+      tmp1 = 481.9;
+  } else if (FT1 <= 1964.94) {
+    if (FT1 == 1959.54)
+      tmp1 = 482;
+    else if (FT1 <= 1960.14)
+      tmp1 = 482.1;
+    else if (FT1 <= 1960.74)
+      tmp1 = 482.2;
+    else if (FT1 <= 1961.34)
+      tmp1 = 482.3;
+    else if (FT1 <= 1961.94)
+      tmp1 = 482.4;
+    else if (FT1 <= 1962.54)
+      tmp1 = 482.5;
+    else if (FT1 <= 1963.14)
+      tmp1 = 482.6;
+    else if (FT1 <= 1963.74)
+      tmp1 = 482.7;
+    else if (FT1 <= 1964.34)
+      tmp1 = 482.8;
+    else if (FT1 <= 1964.94)
+      tmp1 = 482.9;
+  } else if (FT1 <= 1970.94) {
+    if (FT1 == 1965.54)
+      tmp1 = 483;
+    else if (FT1 <= 1966.14)
+      tmp1 = 483.1;
+    else if (FT1 <= 1966.74)
+      tmp1 = 483.2;
+    else if (FT1 <= 1967.34)
+      tmp1 = 483.3;
+    else if (FT1 <= 1967.94)
+      tmp1 = 483.4;
+    else if (FT1 <= 1968.54)
+      tmp1 = 483.5;
+    else if (FT1 <= 1969.14)
+      tmp1 = 483.6;
+    else if (FT1 <= 1969.74)
+      tmp1 = 483.7;
+    else if (FT1 <= 1970.34)
+      tmp1 = 483.8;
+    else if (FT1 <= 1970.94)
+      tmp1 = 483.9;
+  } else if (FT1 <= 1976.95) {
+    if (FT1 == 1971.54)
+      tmp1 = 484;
+    else if (FT1 <= 1972.14)
+      tmp1 = 484.1;
+    else if (FT1 <= 1972.74)
+      tmp1 = 484.2;
+    else if (FT1 <= 1973.34)
+      tmp1 = 484.3;
+    else if (FT1 <= 1973.94)
+      tmp1 = 484.4;
+    else if (FT1 <= 1974.55)
+      tmp1 = 484.5;
+    else if (FT1 <= 1975.15)
+      tmp1 = 484.6;
+    else if (FT1 <= 1975.75)
+      tmp1 = 484.7;
+    else if (FT1 <= 1976.35)
+      tmp1 = 484.8;
+    else if (FT1 <= 1976.95)
+      tmp1 = 484.9;
+  } else if (FT1 <= 1982.96) {
+    if (FT1 == 1977.55)
+      tmp1 = 485;
+    else if (FT1 <= 1978.15)
+      tmp1 = 485.1;
+    else if (FT1 <= 1978.75)
+      tmp1 = 485.2;
+    else if (FT1 <= 1979.35)
+      tmp1 = 485.3;
+    else if (FT1 <= 1979.96)
+      tmp1 = 485.4;
+    else if (FT1 <= 1980.56)
+      tmp1 = 485.5;
+    else if (FT1 <= 1981.16)
+      tmp1 = 485.6;
+    else if (FT1 <= 1981.76)
+      tmp1 = 485.7;
+    else if (FT1 <= 1982.36)
+      tmp1 = 485.8;
+    else if (FT1 <= 1982.96)
+      tmp1 = 485.9;
+  } else if (FT1 <= 1988.98) {
+    if (FT1 == 1983.57)
+      tmp1 = 486;
+    else if (FT1 <= 1984.17)
+      tmp1 = 486.1;
+    else if (FT1 <= 1984.77)
+      tmp1 = 486.2;
+    else if (FT1 <= 1985.37)
+      tmp1 = 486.3;
+    else if (FT1 <= 1985.97)
+      tmp1 = 486.4;
+    else if (FT1 <= 1986.57)
+      tmp1 = 486.5;
+    else if (FT1 <= 1987.18)
+      tmp1 = 486.6;
+    else if (FT1 <= 1987.78)
+      tmp1 = 486.7;
+    else if (FT1 <= 1988.38)
+      tmp1 = 486.8;
+    else if (FT1 <= 1988.98)
+      tmp1 = 486.9;
+  } else if (FT1 <= 1995.01) {
+    if (FT1 == 1989.58)
+      tmp1 = 487;
+    else if (FT1 <= 1990.19)
+      tmp1 = 487.1;
+    else if (FT1 <= 1990.79)
+      tmp1 = 487.2;
+    else if (FT1 <= 1991.39)
+      tmp1 = 487.3;
+    else if (FT1 <= 1991.99)
+      tmp1 = 487.4;
+    else if (FT1 <= 1992.6)
+      tmp1 = 487.5;
+    else if (FT1 <= 1993.2)
+      tmp1 = 487.6;
+    else if (FT1 <= 1993.8)
+      tmp1 = 487.7;
+    else if (FT1 <= 1994.4)
+      tmp1 = 487.8;
+    else if (FT1 <= 1995.01)
+      tmp1 = 487.9;
+  } else if (FT1 <= 2001.04) {
+    if (FT1 == 1995.61)
+      tmp1 = 488;
+    else if (FT1 <= 1996.21)
+      tmp1 = 488.1;
+    else if (FT1 <= 1996.82)
+      tmp1 = 488.2;
+    else if (FT1 <= 1997.42)
+      tmp1 = 488.3;
+    else if (FT1 <= 1998.02)
+      tmp1 = 488.4;
+    else if (FT1 <= 1998.62)
+      tmp1 = 488.5;
+    else if (FT1 <= 1999.23)
+      tmp1 = 488.6;
+    else if (FT1 <= 1999.83)
+      tmp1 = 488.7;
+    else if (FT1 <= 2000.43)
+      tmp1 = 488.8;
+    else if (FT1 <= 2001.04)
+      tmp1 = 488.9;
+  } else if (FT1 <= 2007.07) {
+    if (FT1 == 2001.64)
+      tmp1 = 489;
+    else if (FT1 <= 2002.24)
+      tmp1 = 489.1;
+    else if (FT1 <= 2002.85)
+      tmp1 = 489.2;
+    else if (FT1 <= 2003.45)
+      tmp1 = 489.3;
+    else if (FT1 <= 2004.05)
+      tmp1 = 489.4;
+    else if (FT1 <= 2004.66)
+      tmp1 = 489.5;
+    else if (FT1 <= 2005.26)
+      tmp1 = 489.6;
+    else if (FT1 <= 2005.86)
+      tmp1 = 489.7;
+    else if (FT1 <= 2006.47)
+      tmp1 = 489.8;
+    else if (FT1 <= 2007.07)
+      tmp1 = 489.9;
+  } else if (FT1 <= 2013.11) {
+    if (FT1 == 2007.67)
+      tmp1 = 490;
+    else if (FT1 <= 2008.28)
+      tmp1 = 490.1;
+    else if (FT1 <= 2008.88)
+      tmp1 = 490.2;
+    else if (FT1 <= 2009.49)
+      tmp1 = 490.3;
+    else if (FT1 <= 2010.09)
+      tmp1 = 490.4;
+    else if (FT1 <= 2010.69)
+      tmp1 = 490.5;
+    else if (FT1 <= 2011.3)
+      tmp1 = 490.6;
+    else if (FT1 <= 2011.9)
+      tmp1 = 490.7;
+    else if (FT1 <= 2012.51)
+      tmp1 = 490.8;
+    else if (FT1 <= 2013.11)
+      tmp1 = 490.9;
+  } else if (FT1 <= 2019.15) {
+    if (FT1 == 2013.71)
+      tmp1 = 491;
+    else if (FT1 <= 2014.32)
+      tmp1 = 491.1;
+    else if (FT1 <= 2014.92)
+      tmp1 = 491.2;
+    else if (FT1 <= 2015.53)
+      tmp1 = 491.3;
+    else if (FT1 <= 2016.13)
+      tmp1 = 491.4;
+    else if (FT1 <= 2016.74)
+      tmp1 = 491.5;
+    else if (FT1 <= 2017.34)
+      tmp1 = 491.6;
+    else if (FT1 <= 2017.94)
+      tmp1 = 491.7;
+    else if (FT1 <= 2018.55)
+      tmp1 = 491.8;
+    else if (FT1 <= 2019.15)
+      tmp1 = 491.9;
+  } else if (FT1 <= 2025.2) {
+    if (FT1 == 2019.76)
+      tmp1 = 492;
+    else if (FT1 <= 2020.36)
+      tmp1 = 492.1;
+    else if (FT1 <= 2020.97)
+      tmp1 = 492.2;
+    else if (FT1 <= 2021.57)
+      tmp1 = 492.3;
+    else if (FT1 <= 2022.18)
+      tmp1 = 492.4;
+    else if (FT1 <= 2022.78)
+      tmp1 = 492.5;
+    else if (FT1 <= 2023.39)
+      tmp1 = 492.6;
+    else if (FT1 <= 2023.99)
+      tmp1 = 492.7;
+    else if (FT1 <= 2024.6)
+      tmp1 = 492.8;
+    else if (FT1 <= 2025.2)
+      tmp1 = 492.9;
+  } else if (FT1 <= 2031.26) {
+    if (FT1 == 2025.81)
+      tmp1 = 493;
+    else if (FT1 <= 2026.41)
+      tmp1 = 493.1;
+    else if (FT1 <= 2027.02)
+      tmp1 = 493.2;
+    else if (FT1 <= 2027.62)
+      tmp1 = 493.3;
+    else if (FT1 <= 2028.23)
+      tmp1 = 493.4;
+    else if (FT1 <= 2028.83)
+      tmp1 = 493.5;
+    else if (FT1 <= 2029.44)
+      tmp1 = 493.6;
+    else if (FT1 <= 2030.05)
+      tmp1 = 493.7;
+    else if (FT1 <= 2030.65)
+      tmp1 = 493.8;
+    else if (FT1 <= 2031.26)
+      tmp1 = 493.9;
+  } else if (FT1 <= 2037.31) {
+    if (FT1 == 2031.86)
+      tmp1 = 494;
+    else if (FT1 <= 2032.47)
+      tmp1 = 494.1;
+    else if (FT1 <= 2033.07)
+      tmp1 = 494.2;
+    else if (FT1 <= 2033.68)
+      tmp1 = 494.3;
+    else if (FT1 <= 2034.28)
+      tmp1 = 494.4;
+    else if (FT1 <= 2034.89)
+      tmp1 = 494.5;
+    else if (FT1 <= 2035.5)
+      tmp1 = 494.6;
+    else if (FT1 <= 2036.1)
+      tmp1 = 494.7;
+    else if (FT1 <= 2036.71)
+      tmp1 = 494.8;
+    else if (FT1 <= 2037.31)
+      tmp1 = 494.9;
+  } else if (FT1 <= 2043.38) {
+    if (FT1 == 2037.92)
+      tmp1 = 495;
+    else if (FT1 <= 2038.53)
+      tmp1 = 495.1;
+    else if (FT1 <= 2039.13)
+      tmp1 = 495.2;
+    else if (FT1 <= 2039.74)
+      tmp1 = 495.3;
+    else if (FT1 <= 2040.35)
+      tmp1 = 495.4;
+    else if (FT1 <= 2040.95)
+      tmp1 = 495.5;
+    else if (FT1 <= 2041.56)
+      tmp1 = 495.6;
+    else if (FT1 <= 2042.17)
+      tmp1 = 495.7;
+    else if (FT1 <= 2042.77)
+      tmp1 = 495.8;
+    else if (FT1 <= 2043.38)
+      tmp1 = 495.9;
+  } else if (FT1 <= 2049.45) {
+    if (FT1 == 2043.99)
+      tmp1 = 496;
+    else if (FT1 <= 2044.59)
+      tmp1 = 496.1;
+    else if (FT1 <= 2045.2)
+      tmp1 = 496.2;
+    else if (FT1 <= 2045.81)
+      tmp1 = 496.3;
+    else if (FT1 <= 2046.41)
+      tmp1 = 496.4;
+    else if (FT1 <= 2047.02)
+      tmp1 = 496.5;
+    else if (FT1 <= 2047.63)
+      tmp1 = 496.6;
+    else if (FT1 <= 2048.23)
+      tmp1 = 496.7;
+    else if (FT1 <= 2048.84)
+      tmp1 = 496.8;
+    else if (FT1 <= 2049.45)
+      tmp1 = 496.9;
+  } else if (FT1 <= 2055.52) {
+    if (FT1 == 2050.05)
+      tmp1 = 497;
+    else if (FT1 <= 2050.66)
+      tmp1 = 497.1;
+    else if (FT1 <= 2051.27)
+      tmp1 = 497.2;
+    else if (FT1 <= 2051.88)
+      tmp1 = 497.3;
+    else if (FT1 <= 2052.48)
+      tmp1 = 497.4;
+    else if (FT1 <= 2053.09)
+      tmp1 = 497.5;
+    else if (FT1 <= 2053.7)
+      tmp1 = 497.6;
+    else if (FT1 <= 2054.31)
+      tmp1 = 497.7;
+    else if (FT1 <= 2054.91)
+      tmp1 = 497.8;
+    else if (FT1 <= 2055.52)
+      tmp1 = 497.9;
+  } else if (FT1 <= 2061.6) {
+    if (FT1 == 2056.13)
+      tmp1 = 498;
+    else if (FT1 <= 2056.74)
+      tmp1 = 498.1;
+    else if (FT1 <= 2057.34)
+      tmp1 = 498.2;
+    else if (FT1 <= 2057.95)
+      tmp1 = 498.3;
+    else if (FT1 <= 2058.56)
+      tmp1 = 498.4;
+    else if (FT1 <= 2059.17)
+      tmp1 = 498.5;
+    else if (FT1 <= 2059.77)
+      tmp1 = 498.6;
+    else if (FT1 <= 2060.38)
+      tmp1 = 498.7;
+    else if (FT1 <= 2060.99)
+      tmp1 = 498.8;
+    else if (FT1 <= 2061.6)
+      tmp1 = 498.9;
+  } else if (FT1 <= 2067.68) {
+    if (FT1 == 2062.21)
+      tmp1 = 499;
+    else if (FT1 <= 2062.81)
+      tmp1 = 499.1;
+    else if (FT1 <= 2063.42)
+      tmp1 = 499.2;
+    else if (FT1 <= 2064.03)
+      tmp1 = 499.3;
+    else if (FT1 <= 2064.64)
+      tmp1 = 499.4;
+    else if (FT1 <= 2065.25)
+      tmp1 = 499.5;
+    else if (FT1 <= 2065.86)
+      tmp1 = 499.6;
+    else if (FT1 <= 2066.46)
+      tmp1 = 499.7;
+    else if (FT1 <= 2067.07)
+      tmp1 = 499.8;
+    else if (FT1 <= 2067.68)
+      tmp1 = 499.9;
+  } else if (FT1 <= 2073.77) {
+    if (FT1 == 2068.29)
+      tmp1 = 500;
+    else if (FT1 <= 2068.9)
+      tmp1 = 500.1;
+    else if (FT1 <= 2069.51)
+      tmp1 = 500.2;
+    else if (FT1 <= 2070.12)
+      tmp1 = 500.3;
+    else if (FT1 <= 2070.72)
+      tmp1 = 500.4;
+    else if (FT1 <= 2071.33)
+      tmp1 = 500.5;
+    else if (FT1 <= 2071.94)
+      tmp1 = 500.6;
+    else if (FT1 <= 2072.55)
+      tmp1 = 500.7;
+    else if (FT1 <= 2073.16)
+      tmp1 = 500.8;
+    else if (FT1 <= 2073.77)
+      tmp1 = 500.9;
+  } else if (FT1 <= 2079.86) {
+    if (FT1 == 2074.38)
+      tmp1 = 501;
+    else if (FT1 <= 2074.99)
+      tmp1 = 501.1;
+    else if (FT1 <= 2075.6)
+      tmp1 = 501.2;
+    else if (FT1 <= 2076.21)
+      tmp1 = 501.3;
+    else if (FT1 <= 2076.81)
+      tmp1 = 501.4;
+    else if (FT1 <= 2077.42)
+      tmp1 = 501.5;
+    else if (FT1 <= 2078.03)
+      tmp1 = 501.6;
+    else if (FT1 <= 2078.64)
+      tmp1 = 501.7;
+    else if (FT1 <= 2079.25)
+      tmp1 = 501.8;
+    else if (FT1 <= 2079.86)
+      tmp1 = 501.9;
+  } else if (FT1 <= 2085.96) {
+    if (FT1 == 2080.47)
+      tmp1 = 502;
+    else if (FT1 <= 2081.08)
+      tmp1 = 502.1;
+    else if (FT1 <= 2081.69)
+      tmp1 = 502.2;
+    else if (FT1 <= 2082.3)
+      tmp1 = 502.3;
+    else if (FT1 <= 2082.91)
+      tmp1 = 502.4;
+    else if (FT1 <= 2083.52)
+      tmp1 = 502.5;
+    else if (FT1 <= 2084.13)
+      tmp1 = 502.6;
+    else if (FT1 <= 2084.74)
+      tmp1 = 502.7;
+    else if (FT1 <= 2085.35)
+      tmp1 = 502.8;
+    else if (FT1 <= 2085.96)
+      tmp1 = 502.9;
+  } else if (FT1 <= 2092.06) {
+    if (FT1 == 2086.57)
+      tmp1 = 503;
+    else if (FT1 <= 2087.18)
+      tmp1 = 503.1;
+    else if (FT1 <= 2087.79)
+      tmp1 = 503.2;
+    else if (FT1 <= 2088.4)
+      tmp1 = 503.3;
+    else if (FT1 <= 2089.01)
+      tmp1 = 503.4;
+    else if (FT1 <= 2089.62)
+      tmp1 = 503.5;
+    else if (FT1 <= 2090.23)
+      tmp1 = 503.6;
+    else if (FT1 <= 2090.84)
+      tmp1 = 503.7;
+    else if (FT1 <= 2091.45)
+      tmp1 = 503.8;
+    else if (FT1 <= 2092.06)
+      tmp1 = 503.9;
+  } else if (FT1 <= 2098.17) {
+    if (FT1 == 2092.67)
+      tmp1 = 504;
+    else if (FT1 <= 2093.28)
+      tmp1 = 504.1;
+    else if (FT1 <= 2093.89)
+      tmp1 = 504.2;
+    else if (FT1 <= 2094.5)
+      tmp1 = 504.3;
+    else if (FT1 <= 2095.11)
+      tmp1 = 504.4;
+    else if (FT1 <= 2095.72)
+      tmp1 = 504.5;
+    else if (FT1 <= 2096.34)
+      tmp1 = 504.6;
+    else if (FT1 <= 2096.95)
+      tmp1 = 504.7;
+    else if (FT1 <= 2097.56)
+      tmp1 = 504.8;
+    else if (FT1 <= 2098.17)
+      tmp1 = 504.9;
+  } else if (FT1 <= 2104.28) {
+    if (FT1 == 2098.78)
+      tmp1 = 505;
+    else if (FT1 <= 2099.39)
+      tmp1 = 505.1;
+    else if (FT1 <= 2100)
+      tmp1 = 505.2;
+    else if (FT1 <= 2100.61)
+      tmp1 = 505.3;
+    else if (FT1 <= 2101.22)
+      tmp1 = 505.4;
+    else if (FT1 <= 2101.83)
+      tmp1 = 505.5;
+    else if (FT1 <= 2102.45)
+      tmp1 = 505.6;
+    else if (FT1 <= 2103.06)
+      tmp1 = 505.7;
+    else if (FT1 <= 2103.67)
+      tmp1 = 505.8;
+    else if (FT1 <= 2104.28)
+      tmp1 = 505.9;
+  } else if (FT1 <= 2110.4) {
+    if (FT1 == 2104.89)
+      tmp1 = 506;
+    else if (FT1 <= 2105.5)
+      tmp1 = 506.1;
+    else if (FT1 <= 2106.11)
+      tmp1 = 506.2;
+    else if (FT1 <= 2106.73)
+      tmp1 = 506.3;
+    else if (FT1 <= 2107.34)
+      tmp1 = 506.4;
+    else if (FT1 <= 2107.95)
+      tmp1 = 506.5;
+    else if (FT1 <= 2108.56)
+      tmp1 = 506.6;
+    else if (FT1 <= 2109.17)
+      tmp1 = 506.7;
+    else if (FT1 <= 2109.78)
+      tmp1 = 506.8;
+    else if (FT1 <= 2110.4)
+      tmp1 = 506.9;
+  } else if (FT1 <= 2116.52) {
+    if (FT1 == 2111.01)
+      tmp1 = 507;
+    else if (FT1 <= 2111.62)
+      tmp1 = 507.1;
+    else if (FT1 <= 2112.23)
+      tmp1 = 507.2;
+    else if (FT1 <= 2112.84)
+      tmp1 = 507.3;
+    else if (FT1 <= 2113.46)
+      tmp1 = 507.4;
+    else if (FT1 <= 2114.07)
+      tmp1 = 507.5;
+    else if (FT1 <= 2114.68)
+      tmp1 = 507.6;
+    else if (FT1 <= 2115.29)
+      tmp1 = 507.7;
+    else if (FT1 <= 2115.9)
+      tmp1 = 507.8;
+    else if (FT1 <= 2116.52)
+      tmp1 = 507.9;
+  } else if (FT1 <= 2122.64) {
+    if (FT1 == 2117.13)
+      tmp1 = 508;
+    else if (FT1 <= 2117.74)
+      tmp1 = 508.1;
+    else if (FT1 <= 2118.35)
+      tmp1 = 508.2;
+    else if (FT1 <= 2118.97)
+      tmp1 = 508.3;
+    else if (FT1 <= 2119.58)
+      tmp1 = 508.4;
+    else if (FT1 <= 2120.19)
+      tmp1 = 508.5;
+    else if (FT1 <= 2120.8)
+      tmp1 = 508.6;
+    else if (FT1 <= 2121.42)
+      tmp1 = 508.7;
+    else if (FT1 <= 2122.03)
+      tmp1 = 508.8;
+    else if (FT1 <= 2122.64)
+      tmp1 = 508.9;
+  } else if (FT1 <= 2128.77) {
+    if (FT1 == 2123.25)
+      tmp1 = 509;
+    else if (FT1 <= 2123.87)
+      tmp1 = 509.1;
+    else if (FT1 <= 2124.48)
+      tmp1 = 509.2;
+    else if (FT1 <= 2125.09)
+      tmp1 = 509.3;
+    else if (FT1 <= 2125.71)
+      tmp1 = 509.4;
+    else if (FT1 <= 2126.32)
+      tmp1 = 509.5;
+    else if (FT1 <= 2126.93)
+      tmp1 = 509.6;
+    else if (FT1 <= 2127.55)
+      tmp1 = 509.7;
+    else if (FT1 <= 2128.16)
+      tmp1 = 509.8;
+    else if (FT1 <= 2128.77)
+      tmp1 = 509.9;
+  } else if (FT1 <= 2134.91) {
+    if (FT1 == 2129.39)
+      tmp1 = 510;
+    else if (FT1 <= 2130)
+      tmp1 = 510.1;
+    else if (FT1 <= 2130.61)
+      tmp1 = 510.2;
+    else if (FT1 <= 2131.23)
+      tmp1 = 510.3;
+    else if (FT1 <= 2131.84)
+      tmp1 = 510.4;
+    else if (FT1 <= 2132.45)
+      tmp1 = 510.5;
+    else if (FT1 <= 2133.07)
+      tmp1 = 510.6;
+    else if (FT1 <= 2133.68)
+      tmp1 = 510.7;
+    else if (FT1 <= 2134.29)
+      tmp1 = 510.8;
+    else if (FT1 <= 2134.91)
+      tmp1 = 510.9;
+  } else if (FT1 <= 2141.05) {
+    if (FT1 == 2135.52)
+      tmp1 = 511;
+    else if (FT1 <= 2136.13)
+      tmp1 = 511.1;
+    else if (FT1 <= 2136.75)
+      tmp1 = 511.2;
+    else if (FT1 <= 2137.36)
+      tmp1 = 511.3;
+    else if (FT1 <= 2137.98)
+      tmp1 = 511.4;
+    else if (FT1 <= 2138.59)
+      tmp1 = 511.5;
+    else if (FT1 <= 2139.2)
+      tmp1 = 511.6;
+    else if (FT1 <= 2139.82)
+      tmp1 = 511.7;
+    else if (FT1 <= 2140.43)
+      tmp1 = 511.8;
+    else if (FT1 <= 2141.05)
+      tmp1 = 511.9;
+  } else if (FT1 <= 2147.19) {
+    if (FT1 == 2141.66)
+      tmp1 = 512;
+    else if (FT1 <= 2142.28)
+      tmp1 = 512.1;
+    else if (FT1 <= 2142.89)
+      tmp1 = 512.2;
+    else if (FT1 <= 2143.5)
+      tmp1 = 512.3;
+    else if (FT1 <= 2144.12)
+      tmp1 = 512.4;
+    else if (FT1 <= 2144.73)
+      tmp1 = 512.5;
+    else if (FT1 <= 2145.35)
+      tmp1 = 512.6;
+    else if (FT1 <= 2145.96)
+      tmp1 = 512.7;
+    else if (FT1 <= 2146.58)
+      tmp1 = 512.8;
+    else if (FT1 <= 2147.19)
+      tmp1 = 512.9;
+  } else if (FT1 <= 2153.34) {
+    if (FT1 == 2147.81)
+      tmp1 = 513;
+    else if (FT1 <= 2148.42)
+      tmp1 = 513.1;
+    else if (FT1 <= 2149.04)
+      tmp1 = 513.2;
+    else if (FT1 <= 2149.65)
+      tmp1 = 513.3;
+    else if (FT1 <= 2150.27)
+      tmp1 = 513.4;
+    else if (FT1 <= 2150.88)
+      tmp1 = 513.5;
+    else if (FT1 <= 2151.49)
+      tmp1 = 513.6;
+    else if (FT1 <= 2152.11)
+      tmp1 = 513.7;
+    else if (FT1 <= 2152.73)
+      tmp1 = 513.8;
+    else if (FT1 <= 2153.34)
+      tmp1 = 513.9;
+  } else if (FT1 <= 2159.49) {
+    if (FT1 == 2153.96)
+      tmp1 = 514;
+    else if (FT1 <= 2154.57)
+      tmp1 = 514.1;
+    else if (FT1 <= 2155.19)
+      tmp1 = 514.2;
+    else if (FT1 <= 2155.8)
+      tmp1 = 514.3;
+    else if (FT1 <= 2156.42)
+      tmp1 = 514.4;
+    else if (FT1 <= 2157.03)
+      tmp1 = 514.5;
+    else if (FT1 <= 2157.65)
+      tmp1 = 514.6;
+    else if (FT1 <= 2158.26)
+      tmp1 = 514.7;
+    else if (FT1 <= 2158.88)
+      tmp1 = 514.8;
+    else if (FT1 <= 2159.49)
+      tmp1 = 514.9;
+  } else if (FT1 <= 2165.65) {
+    if (FT1 == 2160.11)
+      tmp1 = 515;
+    else if (FT1 <= 2160.72)
+      tmp1 = 515.1;
+    else if (FT1 <= 2161.34)
+      tmp1 = 515.2;
+    else if (FT1 <= 2161.96)
+      tmp1 = 515.3;
+    else if (FT1 <= 2162.57)
+      tmp1 = 515.4;
+    else if (FT1 <= 2163.19)
+      tmp1 = 515.5;
+    else if (FT1 <= 2163.8)
+      tmp1 = 515.6;
+    else if (FT1 <= 2164.42)
+      tmp1 = 515.7;
+    else if (FT1 <= 2165.04)
+      tmp1 = 515.8;
+    else if (FT1 <= 2165.65)
+      tmp1 = 515.9;
+  } else if (FT1 <= 2171.81) {
+    if (FT1 == 2166.27)
+      tmp1 = 516;
+    else if (FT1 <= 2166.88)
+      tmp1 = 516.1;
+    else if (FT1 <= 2167.5)
+      tmp1 = 516.2;
+    else if (FT1 <= 2168.12)
+      tmp1 = 516.3;
+    else if (FT1 <= 2168.73)
+      tmp1 = 516.4;
+    else if (FT1 <= 2169.35)
+      tmp1 = 516.5;
+    else if (FT1 <= 2169.97)
+      tmp1 = 516.6;
+    else if (FT1 <= 2170.58)
+      tmp1 = 516.7;
+    else if (FT1 <= 2171.2)
+      tmp1 = 516.8;
+    else if (FT1 <= 2171.81)
+      tmp1 = 516.9;
+  } else if (FT1 <= 2177.98) {
+    if (FT1 == 2172.43)
+      tmp1 = 517;
+    else if (FT1 <= 2173.05)
+      tmp1 = 517.1;
+    else if (FT1 <= 2173.66)
+      tmp1 = 517.2;
+    else if (FT1 <= 2174.28)
+      tmp1 = 517.3;
+    else if (FT1 <= 2174.9)
+      tmp1 = 517.4;
+    else if (FT1 <= 2175.51)
+      tmp1 = 517.5;
+    else if (FT1 <= 2176.13)
+      tmp1 = 517.6;
+    else if (FT1 <= 2176.75)
+      tmp1 = 517.7;
+    else if (FT1 <= 2177.36)
+      tmp1 = 517.8;
+    else if (FT1 <= 2177.98)
+      tmp1 = 517.9;
+  } else if (FT1 <= 2184.15) {
+    if (FT1 == 2178.6)
+      tmp1 = 518;
+    else if (FT1 <= 2179.22)
+      tmp1 = 518.1;
+    else if (FT1 <= 2179.83)
+      tmp1 = 518.2;
+    else if (FT1 <= 2180.45)
+      tmp1 = 518.3;
+    else if (FT1 <= 2181.07)
+      tmp1 = 518.4;
+    else if (FT1 <= 2181.68)
+      tmp1 = 518.5;
+    else if (FT1 <= 2182.3)
+      tmp1 = 518.6;
+    else if (FT1 <= 2182.92)
+      tmp1 = 518.7;
+    else if (FT1 <= 2183.54)
+      tmp1 = 518.8;
+    else if (FT1 <= 2184.15)
+      tmp1 = 518.9;
+  } else if (FT1 <= 2190.33) {
+    if (FT1 == 2184.77)
+      tmp1 = 519;
+    else if (FT1 <= 2185.39)
+      tmp1 = 519.1;
+    else if (FT1 <= 2186.01)
+      tmp1 = 519.2;
+    else if (FT1 <= 2186.62)
+      tmp1 = 519.3;
+    else if (FT1 <= 2187.24)
+      tmp1 = 519.4;
+    else if (FT1 <= 2187.86)
+      tmp1 = 519.5;
+    else if (FT1 <= 2188.48)
+      tmp1 = 519.6;
+    else if (FT1 <= 2189.09)
+      tmp1 = 519.7;
+    else if (FT1 <= 2189.71)
+      tmp1 = 519.8;
+    else if (FT1 <= 2190.33)
+      tmp1 = 519.9;
+  } else if (FT1 <= 2196.51) {
+    if (FT1 == 2190.95)
+      tmp1 = 520;
+    else if (FT1 <= 2191.57)
+      tmp1 = 520.1;
+    else if (FT1 <= 2192.18)
+      tmp1 = 520.2;
+    else if (FT1 <= 2192.8)
+      tmp1 = 520.3;
+    else if (FT1 <= 2193.42)
+      tmp1 = 520.4;
+    else if (FT1 <= 2194.04)
+      tmp1 = 520.5;
+    else if (FT1 <= 2194.66)
+      tmp1 = 520.6;
+    else if (FT1 <= 2195.27)
+      tmp1 = 520.7;
+    else if (FT1 <= 2195.89)
+      tmp1 = 520.8;
+    else if (FT1 <= 2196.51)
+      tmp1 = 520.9;
+  } else if (FT1 <= 2202.7) {
+    if (FT1 == 2197.13)
+      tmp1 = 521;
+    else if (FT1 <= 2197.75)
+      tmp1 = 521.1;
+    else if (FT1 <= 2198.37)
+      tmp1 = 521.2;
+    else if (FT1 <= 2198.98)
+      tmp1 = 521.3;
+    else if (FT1 <= 2199.6)
+      tmp1 = 521.4;
+    else if (FT1 <= 2200.22)
+      tmp1 = 521.5;
+    else if (FT1 <= 2200.84)
+      tmp1 = 521.6;
+    else if (FT1 <= 2201.46)
+      tmp1 = 521.7;
+    else if (FT1 <= 2202.08)
+      tmp1 = 521.8;
+    else if (FT1 <= 2202.7)
+      tmp1 = 521.9;
+  } else if (FT1 <= 2208.89) {
+    if (FT1 == 2203.32)
+      tmp1 = 522;
+    else if (FT1 <= 2203.93)
+      tmp1 = 522.1;
+    else if (FT1 <= 2204.55)
+      tmp1 = 522.2;
+    else if (FT1 <= 2205.17)
+      tmp1 = 522.3;
+    else if (FT1 <= 2205.79)
+      tmp1 = 522.4;
+    else if (FT1 <= 2206.41)
+      tmp1 = 522.5;
+    else if (FT1 <= 2207.03)
+      tmp1 = 522.6;
+    else if (FT1 <= 2207.65)
+      tmp1 = 522.7;
+    else if (FT1 <= 2208.27)
+      tmp1 = 522.8;
+    else if (FT1 <= 2208.89)
+      tmp1 = 522.9;
+  } else if (FT1 <= 2215.08) {
+    if (FT1 == 2209.51)
+      tmp1 = 523;
+    else if (FT1 <= 2210.12)
+      tmp1 = 523.1;
+    else if (FT1 <= 2210.74)
+      tmp1 = 523.2;
+    else if (FT1 <= 2211.36)
+      tmp1 = 523.3;
+    else if (FT1 <= 2211.98)
+      tmp1 = 523.4;
+    else if (FT1 <= 2212.6)
+      tmp1 = 523.5;
+    else if (FT1 <= 2213.22)
+      tmp1 = 523.6;
+    else if (FT1 <= 2213.84)
+      tmp1 = 523.7;
+    else if (FT1 <= 2214.46)
+      tmp1 = 523.8;
+    else if (FT1 <= 2215.08)
+      tmp1 = 523.9;
+  } else if (FT1 <= 2221.28) {
+    if (FT1 == 2215.7)
+      tmp1 = 524;
+    else if (FT1 <= 2216.32)
+      tmp1 = 524.1;
+    else if (FT1 <= 2216.94)
+      tmp1 = 524.2;
+    else if (FT1 <= 2217.56)
+      tmp1 = 524.3;
+    else if (FT1 <= 2218.18)
+      tmp1 = 524.4;
+    else if (FT1 <= 2218.8)
+      tmp1 = 524.5;
+    else if (FT1 <= 2219.42)
+      tmp1 = 524.6;
+    else if (FT1 <= 2220.04)
+      tmp1 = 524.7;
+    else if (FT1 <= 2220.66)
+      tmp1 = 524.8;
+    else if (FT1 <= 2221.28)
+      tmp1 = 524.9;
+  } else if (FT1 <= 2227.48) {
+    if (FT1 == 2221.9)
+      tmp1 = 525;
+    else if (FT1 <= 2222.52)
+      tmp1 = 525.1;
+    else if (FT1 <= 2223.14)
+      tmp1 = 525.2;
+    else if (FT1 <= 2223.76)
+      tmp1 = 525.3;
+    else if (FT1 <= 2224.38)
+      tmp1 = 525.4;
+    else if (FT1 <= 2225)
+      tmp1 = 525.5;
+    else if (FT1 <= 2225.62)
+      tmp1 = 525.6;
+    else if (FT1 <= 2226.24)
+      tmp1 = 525.7;
+    else if (FT1 <= 2226.86)
+      tmp1 = 525.8;
+    else if (FT1 <= 2227.48)
+      tmp1 = 525.9;
+  } else if (FT1 <= 2233.69) {
+    if (FT1 == 2228.1)
+      tmp1 = 526;
+    else if (FT1 <= 2228.72)
+      tmp1 = 526.1;
+    else if (FT1 <= 2229.34)
+      tmp1 = 526.2;
+    else if (FT1 <= 2229.97)
+      tmp1 = 526.3;
+    else if (FT1 <= 2230.59)
+      tmp1 = 526.4;
+    else if (FT1 <= 2231.21)
+      tmp1 = 526.5;
+    else if (FT1 <= 2231.83)
+      tmp1 = 526.6;
+    else if (FT1 <= 2232.45)
+      tmp1 = 526.7;
+    else if (FT1 <= 2233.07)
+      tmp1 = 526.8;
+    else if (FT1 <= 2233.69)
+      tmp1 = 526.9;
+  } else if (FT1 <= 2239.9) {
+    if (FT1 == 2234.31)
+      tmp1 = 527;
+    else if (FT1 <= 2234.93)
+      tmp1 = 527.1;
+    else if (FT1 <= 2235.55)
+      tmp1 = 527.2;
+    else if (FT1 <= 2236.18)
+      tmp1 = 527.3;
+    else if (FT1 <= 2236.8)
+      tmp1 = 527.4;
+    else if (FT1 <= 2237.42)
+      tmp1 = 527.5;
+    else if (FT1 <= 2238.04)
+      tmp1 = 527.6;
+    else if (FT1 <= 2238.66)
+      tmp1 = 527.7;
+    else if (FT1 <= 2239.28)
+      tmp1 = 527.8;
+    else if (FT1 <= 2239.9)
+      tmp1 = 527.9;
+  } else if (FT1 <= 2246.12) {
+    if (FT1 == 2240.52)
+      tmp1 = 528;
+    else if (FT1 <= 2241.15)
+      tmp1 = 528.1;
+    else if (FT1 <= 2241.77)
+      tmp1 = 528.2;
+    else if (FT1 <= 2242.39)
+      tmp1 = 528.3;
+    else if (FT1 <= 2243.01)
+      tmp1 = 528.4;
+    else if (FT1 <= 2243.63)
+      tmp1 = 528.5;
+    else if (FT1 <= 2244.25)
+      tmp1 = 528.6;
+    else if (FT1 <= 2244.88)
+      tmp1 = 528.7;
+    else if (FT1 <= 2245.5)
+      tmp1 = 528.8;
+    else if (FT1 <= 2246.12)
+      tmp1 = 528.9;
+  } else if (FT1 <= 2252.34) {
+    if (FT1 == 2246.74)
+      tmp1 = 529;
+    else if (FT1 <= 2247.36)
+      tmp1 = 529.1;
+    else if (FT1 <= 2247.99)
+      tmp1 = 529.2;
+    else if (FT1 <= 2248.61)
+      tmp1 = 529.3;
+    else if (FT1 <= 2249.23)
+      tmp1 = 529.4;
+    else if (FT1 <= 2249.85)
+      tmp1 = 529.5;
+    else if (FT1 <= 2250.47)
+      tmp1 = 529.6;
+    else if (FT1 <= 2251.1)
+      tmp1 = 529.7;
+    else if (FT1 <= 2251.72)
+      tmp1 = 529.8;
+    else if (FT1 <= 2252.34)
+      tmp1 = 529.9;
+  } else if (FT1 <= 2258.57) {
+    if (FT1 == 2252.96)
+      tmp1 = 530;
+    else if (FT1 <= 2253.59)
+      tmp1 = 530.1;
+    else if (FT1 <= 2254.21)
+      tmp1 = 530.2;
+    else if (FT1 <= 2254.83)
+      tmp1 = 530.3;
+    else if (FT1 <= 2255.45)
+      tmp1 = 530.4;
+    else if (FT1 <= 2256.08)
+      tmp1 = 530.5;
+    else if (FT1 <= 2256.7)
+      tmp1 = 530.6;
+    else if (FT1 <= 2257.32)
+      tmp1 = 530.7;
+    else if (FT1 <= 2257.94)
+      tmp1 = 530.8;
+    else if (FT1 <= 2258.57)
+      tmp1 = 530.9;
+  } else if (FT1 <= 2264.8) {
+    if (FT1 == 2259.19)
+      tmp1 = 531;
+    else if (FT1 <= 2259.81)
+      tmp1 = 531.1;
+    else if (FT1 <= 2260.43)
+      tmp1 = 531.2;
+    else if (FT1 <= 2261.06)
+      tmp1 = 531.3;
+    else if (FT1 <= 2261.68)
+      tmp1 = 531.4;
+    else if (FT1 <= 2262.3)
+      tmp1 = 531.5;
+    else if (FT1 <= 2262.93)
+      tmp1 = 531.6;
+    else if (FT1 <= 2263.55)
+      tmp1 = 531.7;
+    else if (FT1 <= 2264.17)
+      tmp1 = 531.8;
+    else if (FT1 <= 2264.8)
+      tmp1 = 531.9;
+  } else if (FT1 <= 2271.03) {
+    if (FT1 == 2265.42)
+      tmp1 = 532;
+    else if (FT1 <= 2266.04)
+      tmp1 = 532.1;
+    else if (FT1 <= 2266.67)
+      tmp1 = 532.2;
+    else if (FT1 <= 2267.29)
+      tmp1 = 532.3;
+    else if (FT1 <= 2267.91)
+      tmp1 = 532.4;
+    else if (FT1 <= 2268.54)
+      tmp1 = 532.5;
+    else if (FT1 <= 2269.16)
+      tmp1 = 532.6;
+    else if (FT1 <= 2269.78)
+      tmp1 = 532.7;
+    else if (FT1 <= 2270.41)
+      tmp1 = 532.8;
+    else if (FT1 <= 2271.03)
+      tmp1 = 532.9;
+  } else if (FT1 <= 2277.27) {
+    if (FT1 == 2271.65)
+      tmp1 = 533;
+    else if (FT1 <= 2272.28)
+      tmp1 = 533.1;
+    else if (FT1 <= 2272.9)
+      tmp1 = 533.2;
+    else if (FT1 <= 2273.53)
+      tmp1 = 533.3;
+    else if (FT1 <= 2274.15)
+      tmp1 = 533.4;
+    else if (FT1 <= 2274.77)
+      tmp1 = 533.5;
+    else if (FT1 <= 2275.4)
+      tmp1 = 533.6;
+    else if (FT1 <= 2276.02)
+      tmp1 = 533.7;
+    else if (FT1 <= 2276.64)
+      tmp1 = 533.8;
+    else if (FT1 <= 2277.27)
+      tmp1 = 533.9;
+  } else if (FT1 <= 2283.51) {
+    if (FT1 == 2277.89)
+      tmp1 = 534;
+    else if (FT1 <= 2278.52)
+      tmp1 = 534.1;
+    else if (FT1 <= 2279.14)
+      tmp1 = 534.2;
+    else if (FT1 <= 2279.77)
+      tmp1 = 534.3;
+    else if (FT1 <= 2280.39)
+      tmp1 = 534.4;
+    else if (FT1 <= 2281.01)
+      tmp1 = 534.5;
+    else if (FT1 <= 2281.64)
+      tmp1 = 534.6;
+    else if (FT1 <= 2282.26)
+      tmp1 = 534.7;
+    else if (FT1 <= 2282.89)
+      tmp1 = 534.8;
+    else if (FT1 <= 2283.51)
+      tmp1 = 534.9;
+  } else if (FT1 <= 2289.76) {
+    if (FT1 == 2284.14)
+      tmp1 = 535;
+    else if (FT1 <= 2284.76)
+      tmp1 = 535.1;
+    else if (FT1 <= 2285.39)
+      tmp1 = 535.2;
+    else if (FT1 <= 2286.01)
+      tmp1 = 535.3;
+    else if (FT1 <= 2286.64)
+      tmp1 = 535.4;
+    else if (FT1 <= 2287.26)
+      tmp1 = 535.5;
+    else if (FT1 <= 2287.88)
+      tmp1 = 535.6;
+    else if (FT1 <= 2288.51)
+      tmp1 = 535.7;
+    else if (FT1 <= 2289.13)
+      tmp1 = 535.8;
+    else if (FT1 <= 2289.76)
+      tmp1 = 535.9;
+  } else if (FT1 <= 2296.01) {
+    if (FT1 == 2290.38)
+      tmp1 = 536;
+    else if (FT1 <= 2291.01)
+      tmp1 = 536.1;
+    else if (FT1 <= 2291.63)
+      tmp1 = 536.2;
+    else if (FT1 <= 2292.26)
+      tmp1 = 536.3;
+    else if (FT1 <= 2292.88)
+      tmp1 = 536.4;
+    else if (FT1 <= 2293.51)
+      tmp1 = 536.5;
+    else if (FT1 <= 2294.14)
+      tmp1 = 536.6;
+    else if (FT1 <= 2294.76)
+      tmp1 = 536.7;
+    else if (FT1 <= 2295.39)
+      tmp1 = 536.8;
+    else if (FT1 <= 2296.01)
+      tmp1 = 536.9;
+  } else if (FT1 <= 2302.27) {
+    if (FT1 == 2296.64)
+      tmp1 = 537;
+    else if (FT1 <= 2297.26)
+      tmp1 = 537.1;
+    else if (FT1 <= 2297.89)
+      tmp1 = 537.2;
+    else if (FT1 <= 2298.51)
+      tmp1 = 537.3;
+    else if (FT1 <= 2299.14)
+      tmp1 = 537.4;
+    else if (FT1 <= 2299.76)
+      tmp1 = 537.5;
+    else if (FT1 <= 2300.39)
+      tmp1 = 537.6;
+    else if (FT1 <= 2301.02)
+      tmp1 = 537.7;
+    else if (FT1 <= 2301.64)
+      tmp1 = 537.8;
+    else if (FT1 <= 2302.27)
+      tmp1 = 537.9;
+  } else if (FT1 <= 2308.53) {
+    if (FT1 == 2302.89)
+      tmp1 = 538;
+    else if (FT1 <= 2303.52)
+      tmp1 = 538.1;
+    else if (FT1 <= 2304.14)
+      tmp1 = 538.2;
+    else if (FT1 <= 2304.77)
+      tmp1 = 538.3;
+    else if (FT1 <= 2305.4)
+      tmp1 = 538.4;
+    else if (FT1 <= 2306.02)
+      tmp1 = 538.5;
+    else if (FT1 <= 2306.65)
+      tmp1 = 538.6;
+    else if (FT1 <= 2307.27)
+      tmp1 = 538.7;
+    else if (FT1 <= 2307.9)
+      tmp1 = 538.8;
+    else if (FT1 <= 2308.53)
+      tmp1 = 538.9;
+  } else if (FT1 <= 2314.79) {
+    if (FT1 == 2309.15)
+      tmp1 = 539;
+    else if (FT1 <= 2309.78)
+      tmp1 = 539.1;
+    else if (FT1 <= 2310.41)
+      tmp1 = 539.2;
+    else if (FT1 <= 2311.03)
+      tmp1 = 539.3;
+    else if (FT1 <= 2311.66)
+      tmp1 = 539.4;
+    else if (FT1 <= 2312.29)
+      tmp1 = 539.5;
+    else if (FT1 <= 2312.91)
+      tmp1 = 539.6;
+    else if (FT1 <= 2313.54)
+      tmp1 = 539.7;
+    else if (FT1 <= 2314.17)
+      tmp1 = 539.8;
+    else if (FT1 <= 2314.79)
+      tmp1 = 539.9;
+  } else if (FT1 <= 2321.06) {
+    if (FT1 == 2315.42)
+      tmp1 = 540;
+    else if (FT1 <= 2316.05)
+      tmp1 = 540.1;
+    else if (FT1 <= 2316.67)
+      tmp1 = 540.2;
+    else if (FT1 <= 2317.3)
+      tmp1 = 540.3;
+    else if (FT1 <= 2317.93)
+      tmp1 = 540.4;
+    else if (FT1 <= 2318.55)
+      tmp1 = 540.5;
+    else if (FT1 <= 2319.18)
+      tmp1 = 540.6;
+    else if (FT1 <= 2319.81)
+      tmp1 = 540.7;
+    else if (FT1 <= 2320.43)
+      tmp1 = 540.8;
+    else if (FT1 <= 2321.06)
+      tmp1 = 540.9;
+  } else if (FT1 <= 2327.33) {
+    if (FT1 == 2321.69)
+      tmp1 = 541;
+    else if (FT1 <= 2322.32)
+      tmp1 = 541.1;
+    else if (FT1 <= 2322.94)
+      tmp1 = 541.2;
+    else if (FT1 <= 2323.57)
+      tmp1 = 541.3;
+    else if (FT1 <= 2324.2)
+      tmp1 = 541.4;
+    else if (FT1 <= 2324.82)
+      tmp1 = 541.5;
+    else if (FT1 <= 2325.45)
+      tmp1 = 541.6;
+    else if (FT1 <= 2326.08)
+      tmp1 = 541.7;
+    else if (FT1 <= 2326.71)
+      tmp1 = 541.8;
+    else if (FT1 <= 2327.33)
+      tmp1 = 541.9;
+  } else if (FT1 <= 2333.61) {
+    if (FT1 == 2327.96)
+      tmp1 = 542;
+    else if (FT1 <= 2328.59)
+      tmp1 = 542.1;
+    else if (FT1 <= 2329.22)
+      tmp1 = 542.2;
+    else if (FT1 <= 2329.84)
+      tmp1 = 542.3;
+    else if (FT1 <= 2330.47)
+      tmp1 = 542.4;
+    else if (FT1 <= 2331.1)
+      tmp1 = 542.5;
+    else if (FT1 <= 2331.73)
+      tmp1 = 542.6;
+    else if (FT1 <= 2332.36)
+      tmp1 = 542.7;
+    else if (FT1 <= 2332.98)
+      tmp1 = 542.8;
+    else if (FT1 <= 2333.61)
+      tmp1 = 542.9;
+  } else if (FT1 <= 2339.89) {
+    if (FT1 == 2334.24)
+      tmp1 = 543;
+    else if (FT1 <= 2334.87)
+      tmp1 = 543.1;
+    else if (FT1 <= 2335.5)
+      tmp1 = 543.2;
+    else if (FT1 <= 2336.12)
+      tmp1 = 543.3;
+    else if (FT1 <= 2336.75)
+      tmp1 = 543.4;
+    else if (FT1 <= 2337.38)
+      tmp1 = 543.5;
+    else if (FT1 <= 2338.01)
+      tmp1 = 543.6;
+    else if (FT1 <= 2338.64)
+      tmp1 = 543.7;
+    else if (FT1 <= 2339.26)
+      tmp1 = 543.8;
+    else if (FT1 <= 2339.89)
+      tmp1 = 543.9;
+  } else if (FT1 <= 2346.18) {
+    if (FT1 == 2340.52)
+      tmp1 = 544;
+    else if (FT1 <= 2341.15)
+      tmp1 = 544.1;
+    else if (FT1 <= 2341.78)
+      tmp1 = 544.2;
+    else if (FT1 <= 2342.41)
+      tmp1 = 544.3;
+    else if (FT1 <= 2343.04)
+      tmp1 = 544.4;
+    else if (FT1 <= 2343.66)
+      tmp1 = 544.5;
+    else if (FT1 <= 2344.29)
+      tmp1 = 544.6;
+    else if (FT1 <= 2344.92)
+      tmp1 = 544.7;
+    else if (FT1 <= 2345.55)
+      tmp1 = 544.8;
+    else if (FT1 <= 2346.18)
+      tmp1 = 544.9;
+  } else if (FT1 <= 2352.47) {
+    if (FT1 == 2346.81)
+      tmp1 = 545;
+    else if (FT1 <= 2347.44)
+      tmp1 = 545.1;
+    else if (FT1 <= 2348.07)
+      tmp1 = 545.2;
+    else if (FT1 <= 2348.69)
+      tmp1 = 545.3;
+    else if (FT1 <= 2349.32)
+      tmp1 = 545.4;
+    else if (FT1 <= 2349.95)
+      tmp1 = 545.5;
+    else if (FT1 <= 2350.58)
+      tmp1 = 545.6;
+    else if (FT1 <= 2351.21)
+      tmp1 = 545.7;
+    else if (FT1 <= 2351.84)
+      tmp1 = 545.8;
+    else if (FT1 <= 2352.47)
+      tmp1 = 545.9;
+  } else if (FT1 <= 2358.76) {
+    if (FT1 == 2353.1)
+      tmp1 = 546;
+    else if (FT1 <= 2353.73)
+      tmp1 = 546.1;
+    else if (FT1 <= 2354.36)
+      tmp1 = 546.2;
+    else if (FT1 <= 2354.99)
+      tmp1 = 546.3;
+    else if (FT1 <= 2355.62)
+      tmp1 = 546.4;
+    else if (FT1 <= 2356.24)
+      tmp1 = 546.5;
+    else if (FT1 <= 2356.87)
+      tmp1 = 546.6;
+    else if (FT1 <= 2357.5)
+      tmp1 = 546.7;
+    else if (FT1 <= 2358.13)
+      tmp1 = 546.8;
+    else if (FT1 <= 2358.76)
+      tmp1 = 546.9;
+  } else if (FT1 <= 2365.06) {
+    if (FT1 == 2359.39)
+      tmp1 = 547;
+    else if (FT1 <= 2360.02)
+      tmp1 = 547.1;
+    else if (FT1 <= 2360.65)
+      tmp1 = 547.2;
+    else if (FT1 <= 2361.28)
+      tmp1 = 547.3;
+    else if (FT1 <= 2361.91)
+      tmp1 = 547.4;
+    else if (FT1 <= 2362.54)
+      tmp1 = 547.5;
+    else if (FT1 <= 2363.17)
+      tmp1 = 547.6;
+    else if (FT1 <= 2363.8)
+      tmp1 = 547.7;
+    else if (FT1 <= 2364.43)
+      tmp1 = 547.8;
+    else if (FT1 <= 2365.06)
+      tmp1 = 547.9;
+  } else if (FT1 <= 2371.36) {
+    if (FT1 == 2365.69)
+      tmp1 = 548;
+    else if (FT1 <= 2366.32)
+      tmp1 = 548.1;
+    else if (FT1 <= 2366.95)
+      tmp1 = 548.2;
+    else if (FT1 <= 2367.58)
+      tmp1 = 548.3;
+    else if (FT1 <= 2368.21)
+      tmp1 = 548.4;
+    else if (FT1 <= 2368.84)
+      tmp1 = 548.5;
+    else if (FT1 <= 2369.47)
+      tmp1 = 548.6;
+    else if (FT1 <= 2370.1)
+      tmp1 = 548.7;
+    else if (FT1 <= 2370.73)
+      tmp1 = 548.8;
+    else if (FT1 <= 2371.36)
+      tmp1 = 548.9;
+  } else if (FT1 <= 2377.67) {
+    if (FT1 == 2371.99)
+      tmp1 = 549;
+    else if (FT1 <= 2372.63)
+      tmp1 = 549.1;
+    else if (FT1 <= 2373.26)
+      tmp1 = 549.2;
+    else if (FT1 <= 2373.89)
+      tmp1 = 549.3;
+    else if (FT1 <= 2374.52)
+      tmp1 = 549.4;
+    else if (FT1 <= 2375.15)
+      tmp1 = 549.5;
+    else if (FT1 <= 2375.78)
+      tmp1 = 549.6;
+    else if (FT1 <= 2376.41)
+      tmp1 = 549.7;
+    else if (FT1 <= 2377.04)
+      tmp1 = 549.8;
+    else if (FT1 <= 2377.67)
+      tmp1 = 549.9;
+  } else if (FT1 <= 2383.98) {
+    if (FT1 == 2378.3)
+      tmp1 = 550;
+    else if (FT1 <= 2378.93)
+      tmp1 = 550.1;
+    else if (FT1 <= 2379.56)
+      tmp1 = 550.2;
+    else if (FT1 <= 2380.19)
+      tmp1 = 550.3;
+    else if (FT1 <= 2380.83)
+      tmp1 = 550.4;
+    else if (FT1 <= 2381.46)
+      tmp1 = 550.5;
+    else if (FT1 <= 2382.09)
+      tmp1 = 550.6;
+    else if (FT1 <= 2382.72)
+      tmp1 = 550.7;
+    else if (FT1 <= 2383.35)
+      tmp1 = 550.8;
+    else if (FT1 <= 2383.98)
+      tmp1 = 550.9;
+  } else if (FT1 <= 2390.3) {
+    if (FT1 == 2384.61)
+      tmp1 = 551;
+    else if (FT1 <= 2385.24)
+      tmp1 = 551.1;
+    else if (FT1 <= 2385.88)
+      tmp1 = 551.2;
+    else if (FT1 <= 2386.51)
+      tmp1 = 551.3;
+    else if (FT1 <= 2387.14)
+      tmp1 = 551.4;
+    else if (FT1 <= 2387.77)
+      tmp1 = 551.5;
+    else if (FT1 <= 2388.4)
+      tmp1 = 551.6;
+    else if (FT1 <= 2389.03)
+      tmp1 = 551.7;
+    else if (FT1 <= 2389.67)
+      tmp1 = 551.8;
+    else if (FT1 <= 2390.3)
+      tmp1 = 551.9;
+  } else if (FT1 <= 2396.62) {
+    if (FT1 == 2390.93)
+      tmp1 = 552;
+    else if (FT1 <= 2391.56)
+      tmp1 = 552.1;
+    else if (FT1 <= 2392.19)
+      tmp1 = 552.2;
+    else if (FT1 <= 2392.82)
+      tmp1 = 552.3;
+    else if (FT1 <= 2393.46)
+      tmp1 = 552.4;
+    else if (FT1 <= 2394.09)
+      tmp1 = 552.5;
+    else if (FT1 <= 2394.72)
+      tmp1 = 552.6;
+    else if (FT1 <= 2395.35)
+      tmp1 = 552.7;
+    else if (FT1 <= 2395.98)
+      tmp1 = 552.8;
+    else if (FT1 <= 2396.62)
+      tmp1 = 552.9;
+  } else if (FT1 <= 2402.94) {
+    if (FT1 == 2397.25)
+      tmp1 = 553;
+    else if (FT1 <= 2397.88)
+      tmp1 = 553.1;
+    else if (FT1 <= 2398.51)
+      tmp1 = 553.2;
+    else if (FT1 <= 2399.15)
+      tmp1 = 553.3;
+    else if (FT1 <= 2399.78)
+      tmp1 = 553.4;
+    else if (FT1 <= 2400.41)
+      tmp1 = 553.5;
+    else if (FT1 <= 2401.04)
+      tmp1 = 553.6;
+    else if (FT1 <= 2401.67)
+      tmp1 = 553.7;
+    else if (FT1 <= 2402.31)
+      tmp1 = 553.8;
+    else if (FT1 <= 2402.94)
+      tmp1 = 553.9;
+  } else if (FT1 <= 2409.27) {
+    if (FT1 == 2403.57)
+      tmp1 = 554;
+    else if (FT1 <= 2404.21)
+      tmp1 = 554.1;
+    else if (FT1 <= 2404.84)
+      tmp1 = 554.2;
+    else if (FT1 <= 2405.47)
+      tmp1 = 554.3;
+    else if (FT1 <= 2406.1)
+      tmp1 = 554.4;
+    else if (FT1 <= 2406.74)
+      tmp1 = 554.5;
+    else if (FT1 <= 2407.37)
+      tmp1 = 554.6;
+    else if (FT1 <= 2408)
+      tmp1 = 554.7;
+    else if (FT1 <= 2408.63)
+      tmp1 = 554.8;
+    else if (FT1 <= 2409.27)
+      tmp1 = 554.9;
+  } else if (FT1 <= 2415.6) {
+    if (FT1 == 2409.9)
+      tmp1 = 555;
+    else if (FT1 <= 2410.53)
+      tmp1 = 555.1;
+    else if (FT1 <= 2411.17)
+      tmp1 = 555.2;
+    else if (FT1 <= 2411.8)
+      tmp1 = 555.3;
+    else if (FT1 <= 2412.43)
+      tmp1 = 555.4;
+    else if (FT1 <= 2413.07)
+      tmp1 = 555.5;
+    else if (FT1 <= 2413.7)
+      tmp1 = 555.6;
+    else if (FT1 <= 2414.33)
+      tmp1 = 555.7;
+    else if (FT1 <= 2414.97)
+      tmp1 = 555.8;
+    else if (FT1 <= 2415.6)
+      tmp1 = 555.9;
+  } else if (FT1 <= 2421.93) {
+    if (FT1 == 2416.23)
+      tmp1 = 556;
+    else if (FT1 <= 2416.87)
+      tmp1 = 556.1;
+    else if (FT1 <= 2417.5)
+      tmp1 = 556.2;
+    else if (FT1 <= 2418.13)
+      tmp1 = 556.3;
+    else if (FT1 <= 2418.77)
+      tmp1 = 556.4;
+    else if (FT1 <= 2419.4)
+      tmp1 = 556.5;
+    else if (FT1 <= 2420.03)
+      tmp1 = 556.6;
+    else if (FT1 <= 2420.67)
+      tmp1 = 556.7;
+    else if (FT1 <= 2421.3)
+      tmp1 = 556.8;
+    else if (FT1 <= 2421.93)
+      tmp1 = 556.9;
+  } else if (FT1 <= 2428.27) {
+    if (FT1 == 2422.57)
+      tmp1 = 557;
+    else if (FT1 <= 2423.2)
+      tmp1 = 557.1;
+    else if (FT1 <= 2423.84)
+      tmp1 = 557.2;
+    else if (FT1 <= 2424.47)
+      tmp1 = 557.3;
+    else if (FT1 <= 2425.1)
+      tmp1 = 557.4;
+    else if (FT1 <= 2425.74)
+      tmp1 = 557.5;
+    else if (FT1 <= 2426.37)
+      tmp1 = 557.6;
+    else if (FT1 <= 2427.01)
+      tmp1 = 557.7;
+    else if (FT1 <= 2427.64)
+      tmp1 = 557.8;
+    else if (FT1 <= 2428.27)
+      tmp1 = 557.9;
+  } else if (FT1 <= 2434.62) {
+    if (FT1 == 2428.91)
+      tmp1 = 558;
+    else if (FT1 <= 2429.54)
+      tmp1 = 558.1;
+    else if (FT1 <= 2430.18)
+      tmp1 = 558.2;
+    else if (FT1 <= 2430.81)
+      tmp1 = 558.3;
+    else if (FT1 <= 2431.45)
+      tmp1 = 558.4;
+    else if (FT1 <= 2432.08)
+      tmp1 = 558.5;
+    else if (FT1 <= 2432.71)
+      tmp1 = 558.6;
+    else if (FT1 <= 2433.35)
+      tmp1 = 558.7;
+    else if (FT1 <= 2433.98)
+      tmp1 = 558.8;
+    else if (FT1 <= 2434.62)
+      tmp1 = 558.9;
+  } else if (FT1 <= 2440.97) {
+    if (FT1 == 2435.25)
+      tmp1 = 559;
+    else if (FT1 <= 2435.89)
+      tmp1 = 559.1;
+    else if (FT1 <= 2436.52)
+      tmp1 = 559.2;
+    else if (FT1 <= 2437.16)
+      tmp1 = 559.3;
+    else if (FT1 <= 2437.79)
+      tmp1 = 559.4;
+    else if (FT1 <= 2438.43)
+      tmp1 = 559.5;
+    else if (FT1 <= 2439.06)
+      tmp1 = 559.6;
+    else if (FT1 <= 2439.7)
+      tmp1 = 559.7;
+    else if (FT1 <= 2440.33)
+      tmp1 = 559.8;
+    else if (FT1 <= 2440.97)
+      tmp1 = 559.9;
+  } else if (FT1 <= 2447.32) {
+    if (FT1 == 2441.6)
+      tmp1 = 560;
+    else if (FT1 <= 2442.24)
+      tmp1 = 560.1;
+    else if (FT1 <= 2442.87)
+      tmp1 = 560.2;
+    else if (FT1 <= 2443.51)
+      tmp1 = 560.3;
+    else if (FT1 <= 2444.14)
+      tmp1 = 560.4;
+    else if (FT1 <= 2444.78)
+      tmp1 = 560.5;
+    else if (FT1 <= 2445.41)
+      tmp1 = 560.6;
+    else if (FT1 <= 2446.05)
+      tmp1 = 560.7;
+    else if (FT1 <= 2446.68)
+      tmp1 = 560.8;
+    else if (FT1 <= 2447.32)
+      tmp1 = 560.9;
+  } else if (FT1 <= 2453.67) {
+    if (FT1 == 2447.95)
+      tmp1 = 561;
+    else if (FT1 <= 2448.59)
+      tmp1 = 561.1;
+    else if (FT1 <= 2449.22)
+      tmp1 = 561.2;
+    else if (FT1 <= 2449.86)
+      tmp1 = 561.3;
+    else if (FT1 <= 2450.5)
+      tmp1 = 561.4;
+    else if (FT1 <= 2451.13)
+      tmp1 = 561.5;
+    else if (FT1 <= 2451.77)
+      tmp1 = 561.6;
+    else if (FT1 <= 2452.4)
+      tmp1 = 561.7;
+    else if (FT1 <= 2453.04)
+      tmp1 = 561.8;
+    else if (FT1 <= 2453.67)
+      tmp1 = 561.9;
+  } else if (FT1 <= 2460.03) {
+    if (FT1 == 2454.31)
+      tmp1 = 562;
+    else if (FT1 <= 2454.95)
+      tmp1 = 562.1;
+    else if (FT1 <= 2455.58)
+      tmp1 = 562.2;
+    else if (FT1 <= 2456.22)
+      tmp1 = 562.3;
+    else if (FT1 <= 2456.85)
+      tmp1 = 562.4;
+    else if (FT1 <= 2457.49)
+      tmp1 = 562.5;
+    else if (FT1 <= 2458.13)
+      tmp1 = 562.6;
+    else if (FT1 <= 2458.76)
+      tmp1 = 562.7;
+    else if (FT1 <= 2459.4)
+      tmp1 = 562.8;
+    else if (FT1 <= 2460.03)
+      tmp1 = 562.9;
+  } else if (FT1 <= 2466.4) {
+    if (FT1 == 2460.67)
+      tmp1 = 563;
+    else if (FT1 <= 2461.31)
+      tmp1 = 563.1;
+    else if (FT1 <= 2461.94)
+      tmp1 = 563.2;
+    else if (FT1 <= 2462.58)
+      tmp1 = 563.3;
+    else if (FT1 <= 2463.22)
+      tmp1 = 563.4;
+    else if (FT1 <= 2463.85)
+      tmp1 = 563.5;
+    else if (FT1 <= 2464.49)
+      tmp1 = 563.6;
+    else if (FT1 <= 2465.13)
+      tmp1 = 563.7;
+    else if (FT1 <= 2465.76)
+      tmp1 = 563.8;
+    else if (FT1 <= 2466.4)
+      tmp1 = 563.9;
+  } else if (FT1 <= 2472.77) {
+    if (FT1 == 2467.03)
+      tmp1 = 564;
+    else if (FT1 <= 2467.67)
+      tmp1 = 564.1;
+    else if (FT1 <= 2468.31)
+      tmp1 = 564.2;
+    else if (FT1 <= 2468.94)
+      tmp1 = 564.3;
+    else if (FT1 <= 2469.58)
+      tmp1 = 564.4;
+    else if (FT1 <= 2470.22)
+      tmp1 = 564.5;
+    else if (FT1 <= 2470.86)
+      tmp1 = 564.6;
+    else if (FT1 <= 2471.49)
+      tmp1 = 564.7;
+    else if (FT1 <= 2472.13)
+      tmp1 = 564.8;
+    else if (FT1 <= 2472.77)
+      tmp1 = 564.9;
+  } else if (FT1 <= 2479.14) {
+    if (FT1 == 2473.4)
+      tmp1 = 565;
+    else if (FT1 <= 2474.04)
+      tmp1 = 565.1;
+    else if (FT1 <= 2474.68)
+      tmp1 = 565.2;
+    else if (FT1 <= 2475.31)
+      tmp1 = 565.3;
+    else if (FT1 <= 2475.95)
+      tmp1 = 565.4;
+    else if (FT1 <= 2476.59)
+      tmp1 = 565.5;
+    else if (FT1 <= 2477.23)
+      tmp1 = 565.6;
+    else if (FT1 <= 2477.86)
+      tmp1 = 565.7;
+    else if (FT1 <= 2478.5)
+      tmp1 = 565.8;
+    else if (FT1 <= 2479.14)
+      tmp1 = 565.9;
+  } else if (FT1 <= 2485.51) {
+    if (FT1 == 2479.78)
+      tmp1 = 566;
+    else if (FT1 <= 2480.41)
+      tmp1 = 566.1;
+    else if (FT1 <= 2481.05)
+      tmp1 = 566.2;
+    else if (FT1 <= 2481.69)
+      tmp1 = 566.3;
+    else if (FT1 <= 2482.33)
+      tmp1 = 566.4;
+    else if (FT1 <= 2482.96)
+      tmp1 = 566.5;
+    else if (FT1 <= 2483.6)
+      tmp1 = 566.6;
+    else if (FT1 <= 2484.24)
+      tmp1 = 566.7;
+    else if (FT1 <= 2484.88)
+      tmp1 = 566.8;
+    else if (FT1 <= 2485.51)
+      tmp1 = 566.9;
+  } else if (FT1 <= 2491.89) {
+    if (FT1 == 2486.15)
+      tmp1 = 567;
+    else if (FT1 <= 2486.79)
+      tmp1 = 567.1;
+    else if (FT1 <= 2487.43)
+      tmp1 = 567.2;
+    else if (FT1 <= 2488.07)
+      tmp1 = 567.3;
+    else if (FT1 <= 2488.7)
+      tmp1 = 567.4;
+    else if (FT1 <= 2489.34)
+      tmp1 = 567.5;
+    else if (FT1 <= 2489.98)
+      tmp1 = 567.6;
+    else if (FT1 <= 2490.62)
+      tmp1 = 567.7;
+    else if (FT1 <= 2491.26)
+      tmp1 = 567.8;
+    else if (FT1 <= 2491.89)
+      tmp1 = 567.9;
+  } else if (FT1 <= 2498.28) {
+    if (FT1 == 2492.53)
+      tmp1 = 568;
+    else if (FT1 <= 2493.17)
+      tmp1 = 568.1;
+    else if (FT1 <= 2493.81)
+      tmp1 = 568.2;
+    else if (FT1 <= 2494.45)
+      tmp1 = 568.3;
+    else if (FT1 <= 2495.09)
+      tmp1 = 568.4;
+    else if (FT1 <= 2495.72)
+      tmp1 = 568.5;
+    else if (FT1 <= 2496.36)
+      tmp1 = 568.6;
+    else if (FT1 <= 2497)
+      tmp1 = 568.7;
+    else if (FT1 <= 2497.64)
+      tmp1 = 568.8;
+    else if (FT1 <= 2498.28)
+      tmp1 = 568.9;
+  } else if (FT1 <= 2504.67) {
+    if (FT1 == 2498.92)
+      tmp1 = 569;
+    else if (FT1 <= 2499.56)
+      tmp1 = 569.1;
+    else if (FT1 <= 2500.19)
+      tmp1 = 569.2;
+    else if (FT1 <= 2500.83)
+      tmp1 = 569.3;
+    else if (FT1 <= 2501.47)
+      tmp1 = 569.4;
+    else if (FT1 <= 2502.11)
+      tmp1 = 569.5;
+    else if (FT1 <= 2502.75)
+      tmp1 = 569.6;
+    else if (FT1 <= 2503.39)
+      tmp1 = 569.7;
+    else if (FT1 <= 2504.03)
+      tmp1 = 569.8;
+    else if (FT1 <= 2504.67)
+      tmp1 = 569.9;
+  } else if (FT1 <= 2511.06) {
+    if (FT1 == 2505.3)
+      tmp1 = 570;
+    else if (FT1 <= 2505.94)
+      tmp1 = 570.1;
+    else if (FT1 <= 2506.58)
+      tmp1 = 570.2;
+    else if (FT1 <= 2507.22)
+      tmp1 = 570.3;
+    else if (FT1 <= 2507.86)
+      tmp1 = 570.4;
+    else if (FT1 <= 2508.5)
+      tmp1 = 570.5;
+    else if (FT1 <= 2509.14)
+      tmp1 = 570.6;
+    else if (FT1 <= 2509.78)
+      tmp1 = 570.7;
+    else if (FT1 <= 2510.42)
+      tmp1 = 570.8;
+    else if (FT1 <= 2511.06)
+      tmp1 = 570.9;
+  } else if (FT1 <= 2517.45) {
+    if (FT1 == 2511.7)
+      tmp1 = 571;
+    else if (FT1 <= 2512.34)
+      tmp1 = 571.1;
+    else if (FT1 <= 2512.98)
+      tmp1 = 571.2;
+    else if (FT1 <= 2513.62)
+      tmp1 = 571.3;
+    else if (FT1 <= 2514.26)
+      tmp1 = 571.4;
+    else if (FT1 <= 2514.89)
+      tmp1 = 571.5;
+    else if (FT1 <= 2515.53)
+      tmp1 = 571.6;
+    else if (FT1 <= 2516.17)
+      tmp1 = 571.7;
+    else if (FT1 <= 2516.81)
+      tmp1 = 571.8;
+    else if (FT1 <= 2517.45)
+      tmp1 = 571.9;
+  } else if (FT1 <= 2523.85) {
+    if (FT1 == 2518.09)
+      tmp1 = 572;
+    else if (FT1 <= 2518.73)
+      tmp1 = 572.1;
+    else if (FT1 <= 2519.37)
+      tmp1 = 572.2;
+    else if (FT1 <= 2520.01)
+      tmp1 = 572.3;
+    else if (FT1 <= 2520.65)
+      tmp1 = 572.4;
+    else if (FT1 <= 2521.29)
+      tmp1 = 572.5;
+    else if (FT1 <= 2521.93)
+      tmp1 = 572.6;
+    else if (FT1 <= 2522.57)
+      tmp1 = 572.7;
+    else if (FT1 <= 2523.21)
+      tmp1 = 572.8;
+    else if (FT1 <= 2523.85)
+      tmp1 = 572.9;
+  } else if (FT1 <= 2530.26) {
+    if (FT1 == 2524.49)
+      tmp1 = 573;
+    else if (FT1 <= 2525.13)
+      tmp1 = 573.1;
+    else if (FT1 <= 2525.77)
+      tmp1 = 573.2;
+    else if (FT1 <= 2526.41)
+      tmp1 = 573.3;
+    else if (FT1 <= 2527.05)
+      tmp1 = 573.4;
+    else if (FT1 <= 2527.69)
+      tmp1 = 573.5;
+    else if (FT1 <= 2528.33)
+      tmp1 = 573.6;
+    else if (FT1 <= 2528.98)
+      tmp1 = 573.7;
+    else if (FT1 <= 2529.62)
+      tmp1 = 573.8;
+    else if (FT1 <= 2530.26)
+      tmp1 = 573.9;
+  } else if (FT1 <= 2536.66) {
+    if (FT1 == 2530.9)
+      tmp1 = 574;
+    else if (FT1 <= 2531.54)
+      tmp1 = 574.1;
+    else if (FT1 <= 2532.18)
+      tmp1 = 574.2;
+    else if (FT1 <= 2532.82)
+      tmp1 = 574.3;
+    else if (FT1 <= 2533.46)
+      tmp1 = 574.4;
+    else if (FT1 <= 2534.1)
+      tmp1 = 574.5;
+    else if (FT1 <= 2534.74)
+      tmp1 = 574.6;
+    else if (FT1 <= 2535.38)
+      tmp1 = 574.7;
+    else if (FT1 <= 2536.02)
+      tmp1 = 574.8;
+    else if (FT1 <= 2536.66)
+      tmp1 = 574.9;
+  } else if (FT1 <= 2543.08) {
+    if (FT1 == 2537.3)
+      tmp1 = 575;
+    else if (FT1 <= 2537.95)
+      tmp1 = 575.1;
+    else if (FT1 <= 2538.59)
+      tmp1 = 575.2;
+    else if (FT1 <= 2539.23)
+      tmp1 = 575.3;
+    else if (FT1 <= 2539.87)
+      tmp1 = 575.4;
+    else if (FT1 <= 2540.51)
+      tmp1 = 575.5;
+    else if (FT1 <= 2541.15)
+      tmp1 = 575.6;
+    else if (FT1 <= 2541.79)
+      tmp1 = 575.7;
+    else if (FT1 <= 2542.43)
+      tmp1 = 575.8;
+    else if (FT1 <= 2543.08)
+      tmp1 = 575.9;
+  } else if (FT1 <= 2549.49) {
+    if (FT1 == 2543.72)
+      tmp1 = 576;
+    else if (FT1 <= 2544.36)
+      tmp1 = 576.1;
+    else if (FT1 <= 2545)
+      tmp1 = 576.2;
+    else if (FT1 <= 2545.64)
+      tmp1 = 576.3;
+    else if (FT1 <= 2546.28)
+      tmp1 = 576.4;
+    else if (FT1 <= 2546.92)
+      tmp1 = 576.5;
+    else if (FT1 <= 2547.57)
+      tmp1 = 576.6;
+    else if (FT1 <= 2548.21)
+      tmp1 = 576.7;
+    else if (FT1 <= 2548.85)
+      tmp1 = 576.8;
+    else if (FT1 <= 2549.49)
+      tmp1 = 576.9;
+  } else if (FT1 <= 2555.91) {
+    if (FT1 == 2550.13)
+      tmp1 = 577;
+    else if (FT1 <= 2550.77)
+      tmp1 = 577.1;
+    else if (FT1 <= 2551.42)
+      tmp1 = 577.2;
+    else if (FT1 <= 2552.06)
+      tmp1 = 577.3;
+    else if (FT1 <= 2552.7)
+      tmp1 = 577.4;
+    else if (FT1 <= 2553.34)
+      tmp1 = 577.5;
+    else if (FT1 <= 2553.98)
+      tmp1 = 577.6;
+    else if (FT1 <= 2554.63)
+      tmp1 = 577.7;
+    else if (FT1 <= 2555.27)
+      tmp1 = 577.8;
+    else if (FT1 <= 2555.91)
+      tmp1 = 577.9;
+  } else if (FT1 <= 2562.33) {
+    if (FT1 == 2556.55)
+      tmp1 = 578;
+    else if (FT1 <= 2557.19)
+      tmp1 = 578.1;
+    else if (FT1 <= 2557.84)
+      tmp1 = 578.2;
+    else if (FT1 <= 2558.48)
+      tmp1 = 578.3;
+    else if (FT1 <= 2559.12)
+      tmp1 = 578.4;
+    else if (FT1 <= 2559.76)
+      tmp1 = 578.5;
+    else if (FT1 <= 2560.4)
+      tmp1 = 578.6;
+    else if (FT1 <= 2561.05)
+      tmp1 = 578.7;
+    else if (FT1 <= 2561.69)
+      tmp1 = 578.8;
+    else if (FT1 <= 2562.33)
+      tmp1 = 578.9;
+  } else if (FT1 <= 2568.76) {
+    if (FT1 == 2562.97)
+      tmp1 = 579;
+    else if (FT1 <= 2563.62)
+      tmp1 = 579.1;
+    else if (FT1 <= 2564.26)
+      tmp1 = 579.2;
+    else if (FT1 <= 2564.9)
+      tmp1 = 579.3;
+    else if (FT1 <= 2565.54)
+      tmp1 = 579.4;
+    else if (FT1 <= 2566.19)
+      tmp1 = 579.5;
+    else if (FT1 <= 2566.83)
+      tmp1 = 579.6;
+    else if (FT1 <= 2567.47)
+      tmp1 = 579.7;
+    else if (FT1 <= 2568.12)
+      tmp1 = 579.8;
+    else if (FT1 <= 2568.76)
+      tmp1 = 579.9;
+  } else if (FT1 <= 2575.19) {
+    if (FT1 == 2569.4)
+      tmp1 = 580;
+    else if (FT1 <= 2570.04)
+      tmp1 = 580.1;
+    else if (FT1 <= 2570.69)
+      tmp1 = 580.2;
+    else if (FT1 <= 2571.33)
+      tmp1 = 580.3;
+    else if (FT1 <= 2571.97)
+      tmp1 = 580.4;
+    else if (FT1 <= 2572.62)
+      tmp1 = 580.5;
+    else if (FT1 <= 2573.26)
+      tmp1 = 580.6;
+    else if (FT1 <= 2573.9)
+      tmp1 = 580.7;
+    else if (FT1 <= 2574.55)
+      tmp1 = 580.8;
+    else if (FT1 <= 2575.19)
+      tmp1 = 580.9;
+  } else if (FT1 <= 2581.62) {
+    if (FT1 == 2575.83)
+      tmp1 = 581;
+    else if (FT1 <= 2576.48)
+      tmp1 = 581.1;
+    else if (FT1 <= 2577.12)
+      tmp1 = 581.2;
+    else if (FT1 <= 2577.76)
+      tmp1 = 581.3;
+    else if (FT1 <= 2578.41)
+      tmp1 = 581.4;
+    else if (FT1 <= 2579.05)
+      tmp1 = 581.5;
+    else if (FT1 <= 2579.69)
+      tmp1 = 581.6;
+    else if (FT1 <= 2580.34)
+      tmp1 = 581.7;
+    else if (FT1 <= 2580.98)
+      tmp1 = 581.8;
+    else if (FT1 <= 2581.62)
+      tmp1 = 581.9;
+  } else if (FT1 <= 2588.06) {
+    if (FT1 == 2582.27)
+      tmp1 = 582;
+    else if (FT1 <= 2582.91)
+      tmp1 = 582.1;
+    else if (FT1 <= 2583.55)
+      tmp1 = 582.2;
+    else if (FT1 <= 2584.2)
+      tmp1 = 582.3;
+    else if (FT1 <= 2584.84)
+      tmp1 = 582.4;
+    else if (FT1 <= 2585.49)
+      tmp1 = 582.5;
+    else if (FT1 <= 2586.13)
+      tmp1 = 582.6;
+    else if (FT1 <= 2586.77)
+      tmp1 = 582.7;
+    else if (FT1 <= 2587.42)
+      tmp1 = 582.8;
+    else if (FT1 <= 2588.06)
+      tmp1 = 582.9;
+  } else if (FT1 <= 2594.5) {
+    if (FT1 == 2588.71)
+      tmp1 = 583;
+    else if (FT1 <= 2589.35)
+      tmp1 = 583.1;
+    else if (FT1 <= 2589.99)
+      tmp1 = 583.2;
+    else if (FT1 <= 2590.64)
+      tmp1 = 583.3;
+    else if (FT1 <= 2591.28)
+      tmp1 = 583.4;
+    else if (FT1 <= 2591.93)
+      tmp1 = 583.5;
+    else if (FT1 <= 2592.57)
+      tmp1 = 583.6;
+    else if (FT1 <= 2593.21)
+      tmp1 = 583.7;
+    else if (FT1 <= 2593.86)
+      tmp1 = 583.8;
+    else if (FT1 <= 2594.5)
+      tmp1 = 583.9;
+  } else if (FT1 <= 2600.95) {
+    if (FT1 == 2595.15)
+      tmp1 = 584;
+    else if (FT1 <= 2595.79)
+      tmp1 = 584.1;
+    else if (FT1 <= 2596.44)
+      tmp1 = 584.2;
+    else if (FT1 <= 2597.08)
+      tmp1 = 584.3;
+    else if (FT1 <= 2597.73)
+      tmp1 = 584.4;
+    else if (FT1 <= 2598.37)
+      tmp1 = 584.5;
+    else if (FT1 <= 2599.02)
+      tmp1 = 584.6;
+    else if (FT1 <= 2599.66)
+      tmp1 = 584.7;
+    else if (FT1 <= 2600.3)
+      tmp1 = 584.8;
+    else if (FT1 <= 2600.95)
+      tmp1 = 584.9;
+  } else if (FT1 <= 2607.4) {
+    if (FT1 == 2601.59)
+      tmp1 = 585;
+    else if (FT1 <= 2602.24)
+      tmp1 = 585.1;
+    else if (FT1 <= 2602.88)
+      tmp1 = 585.2;
+    else if (FT1 <= 2603.53)
+      tmp1 = 585.3;
+    else if (FT1 <= 2604.17)
+      tmp1 = 585.4;
+    else if (FT1 <= 2604.82)
+      tmp1 = 585.5;
+    else if (FT1 <= 2605.46)
+      tmp1 = 585.6;
+    else if (FT1 <= 2606.11)
+      tmp1 = 585.7;
+    else if (FT1 <= 2606.75)
+      tmp1 = 585.8;
+    else if (FT1 <= 2607.4)
+      tmp1 = 585.9;
+  } else if (FT1 <= 2613.85) {
+    if (FT1 == 2608.04)
+      tmp1 = 586;
+    else if (FT1 <= 2608.69)
+      tmp1 = 586.1;
+    else if (FT1 <= 2609.33)
+      tmp1 = 586.2;
+    else if (FT1 <= 2609.98)
+      tmp1 = 586.3;
+    else if (FT1 <= 2610.62)
+      tmp1 = 586.4;
+    else if (FT1 <= 2611.27)
+      tmp1 = 586.5;
+    else if (FT1 <= 2611.92)
+      tmp1 = 586.6;
+    else if (FT1 <= 2612.56)
+      tmp1 = 586.7;
+    else if (FT1 <= 2613.21)
+      tmp1 = 586.8;
+    else if (FT1 <= 2613.85)
+      tmp1 = 586.9;
+  } else if (FT1 <= 2620.31) {
+    if (FT1 == 2614.5)
+      tmp1 = 587;
+    else if (FT1 <= 2615.14)
+      tmp1 = 587.1;
+    else if (FT1 <= 2615.79)
+      tmp1 = 587.2;
+    else if (FT1 <= 2616.43)
+      tmp1 = 587.3;
+    else if (FT1 <= 2617.08)
+      tmp1 = 587.4;
+    else if (FT1 <= 2617.73)
+      tmp1 = 587.5;
+    else if (FT1 <= 2618.37)
+      tmp1 = 587.6;
+    else if (FT1 <= 2619.02)
+      tmp1 = 587.7;
+    else if (FT1 <= 2619.66)
+      tmp1 = 587.8;
+    else if (FT1 <= 2620.31)
+      tmp1 = 587.9;
+  } else if (FT1 <= 2626.77) {
+    if (FT1 == 2620.95)
+      tmp1 = 588;
+    else if (FT1 <= 2621.6)
+      tmp1 = 588.1;
+    else if (FT1 <= 2622.25)
+      tmp1 = 588.2;
+    else if (FT1 <= 2622.89)
+      tmp1 = 588.3;
+    else if (FT1 <= 2623.54)
+      tmp1 = 588.4;
+    else if (FT1 <= 2624.18)
+      tmp1 = 588.5;
+    else if (FT1 <= 2624.83)
+      tmp1 = 588.6;
+    else if (FT1 <= 2625.48)
+      tmp1 = 588.7;
+    else if (FT1 <= 2626.12)
+      tmp1 = 588.8;
+    else if (FT1 <= 2626.77)
+      tmp1 = 588.9;
+  } else if (FT1 <= 2633.23) {
+    if (FT1 == 2627.42)
+      tmp1 = 589;
+    else if (FT1 <= 2628.06)
+      tmp1 = 589.1;
+    else if (FT1 <= 2628.71)
+      tmp1 = 589.2;
+    else if (FT1 <= 2629.35)
+      tmp1 = 589.3;
+    else if (FT1 <= 2630)
+      tmp1 = 589.4;
+    else if (FT1 <= 2630.65)
+      tmp1 = 589.5;
+    else if (FT1 <= 2631.29)
+      tmp1 = 589.6;
+    else if (FT1 <= 2631.94)
+      tmp1 = 589.7;
+    else if (FT1 <= 2632.59)
+      tmp1 = 589.8;
+    else if (FT1 <= 2633.23)
+      tmp1 = 589.9;
+  } else if (FT1 <= 2639.7) {
+    if (FT1 == 2633.88)
+      tmp1 = 590;
+    else if (FT1 <= 2634.53)
+      tmp1 = 590.1;
+    else if (FT1 <= 2635.17)
+      tmp1 = 590.2;
+    else if (FT1 <= 2635.82)
+      tmp1 = 590.3;
+    else if (FT1 <= 2636.47)
+      tmp1 = 590.4;
+    else if (FT1 <= 2637.11)
+      tmp1 = 590.5;
+    else if (FT1 <= 2637.76)
+      tmp1 = 590.6;
+    else if (FT1 <= 2638.41)
+      tmp1 = 590.7;
+    else if (FT1 <= 2639.06)
+      tmp1 = 590.8;
+    else if (FT1 <= 2639.7)
+      tmp1 = 590.9;
+  } else if (FT1 <= 2646.17) {
+    if (FT1 == 2640.35)
+      tmp1 = 591;
+    else if (FT1 <= 2641)
+      tmp1 = 591.1;
+    else if (FT1 <= 2641.64)
+      tmp1 = 591.2;
+    else if (FT1 <= 2642.29)
+      tmp1 = 591.3;
+    else if (FT1 <= 2642.94)
+      tmp1 = 591.4;
+    else if (FT1 <= 2643.58)
+      tmp1 = 591.5;
+    else if (FT1 <= 2644.23)
+      tmp1 = 591.6;
+    else if (FT1 <= 2644.88)
+      tmp1 = 591.7;
+    else if (FT1 <= 2645.53)
+      tmp1 = 591.8;
+    else if (FT1 <= 2646.17)
+      tmp1 = 591.9;
+  } else if (FT1 <= 2652.65) {
+    if (FT1 == 2646.82)
+      tmp1 = 592;
+    else if (FT1 <= 2647.47)
+      tmp1 = 592.1;
+    else if (FT1 <= 2648.12)
+      tmp1 = 592.2;
+    else if (FT1 <= 2648.76)
+      tmp1 = 592.3;
+    else if (FT1 <= 2649.41)
+      tmp1 = 592.4;
+    else if (FT1 <= 2650.06)
+      tmp1 = 592.5;
+    else if (FT1 <= 2650.71)
+      tmp1 = 592.6;
+    else if (FT1 <= 2651.35)
+      tmp1 = 592.7;
+    else if (FT1 <= 2652)
+      tmp1 = 592.8;
+    else if (FT1 <= 2652.65)
+      tmp1 = 592.9;
+  } else if (FT1 <= 2659.13) {
+    if (FT1 == 2653.3)
+      tmp1 = 593;
+    else if (FT1 <= 2653.95)
+      tmp1 = 593.1;
+    else if (FT1 <= 2654.59)
+      tmp1 = 593.2;
+    else if (FT1 <= 2655.24)
+      tmp1 = 593.3;
+    else if (FT1 <= 2655.89)
+      tmp1 = 593.4;
+    else if (FT1 <= 2656.54)
+      tmp1 = 593.5;
+    else if (FT1 <= 2657.18)
+      tmp1 = 593.6;
+    else if (FT1 <= 2657.83)
+      tmp1 = 593.7;
+    else if (FT1 <= 2658.48)
+      tmp1 = 593.8;
+    else if (FT1 <= 2659.13)
+      tmp1 = 593.9;
+  } else if (FT1 <= 2665.61) {
+    if (FT1 == 2659.78)
+      tmp1 = 594;
+    else if (FT1 <= 2660.43)
+      tmp1 = 594.1;
+    else if (FT1 <= 2661.07)
+      tmp1 = 594.2;
+    else if (FT1 <= 2661.72)
+      tmp1 = 594.3;
+    else if (FT1 <= 2662.37)
+      tmp1 = 594.4;
+    else if (FT1 <= 2663.02)
+      tmp1 = 594.5;
+    else if (FT1 <= 2663.67)
+      tmp1 = 594.6;
+    else if (FT1 <= 2664.31)
+      tmp1 = 594.7;
+    else if (FT1 <= 2664.96)
+      tmp1 = 594.8;
+    else if (FT1 <= 2665.61)
+      tmp1 = 594.9;
+  } else if (FT1 <= 2672.1) {
+    if (FT1 == 2666.26)
+      tmp1 = 595;
+    else if (FT1 <= 2666.91)
+      tmp1 = 595.1;
+    else if (FT1 <= 2667.56)
+      tmp1 = 595.2;
+    else if (FT1 <= 2668.21)
+      tmp1 = 595.3;
+    else if (FT1 <= 2668.85)
+      tmp1 = 595.4;
+    else if (FT1 <= 2669.5)
+      tmp1 = 595.5;
+    else if (FT1 <= 2670.15)
+      tmp1 = 595.6;
+    else if (FT1 <= 2670.8)
+      tmp1 = 595.7;
+    else if (FT1 <= 2671.45)
+      tmp1 = 595.8;
+    else if (FT1 <= 2672.1)
+      tmp1 = 595.9;
+  } else if (FT1 <= 2678.59) {
+    if (FT1 == 2672.75)
+      tmp1 = 596;
+    else if (FT1 <= 2673.4)
+      tmp1 = 596.1;
+    else if (FT1 <= 2674.05)
+      tmp1 = 596.2;
+    else if (FT1 <= 2674.69)
+      tmp1 = 596.3;
+    else if (FT1 <= 2675.34)
+      tmp1 = 596.4;
+    else if (FT1 <= 2675.99)
+      tmp1 = 596.5;
+    else if (FT1 <= 2676.64)
+      tmp1 = 596.6;
+    else if (FT1 <= 2677.29)
+      tmp1 = 596.7;
+    else if (FT1 <= 2677.94)
+      tmp1 = 596.8;
+    else if (FT1 <= 2678.59)
+      tmp1 = 596.9;
+  } else if (FT1 <= 2685.08) {
+    if (FT1 == 2679.24)
+      tmp1 = 597;
+    else if (FT1 <= 2679.89)
+      tmp1 = 597.1;
+    else if (FT1 <= 2680.54)
+      tmp1 = 597.2;
+    else if (FT1 <= 2681.19)
+      tmp1 = 597.3;
+    else if (FT1 <= 2681.84)
+      tmp1 = 597.4;
+    else if (FT1 <= 2682.48)
+      tmp1 = 597.5;
+    else if (FT1 <= 2683.13)
+      tmp1 = 597.6;
+    else if (FT1 <= 2683.78)
+      tmp1 = 597.7;
+    else if (FT1 <= 2684.43)
+      tmp1 = 597.8;
+    else if (FT1 <= 2685.08)
+      tmp1 = 597.9;
+  } else if (FT1 <= 2691.58) {
+    if (FT1 == 2685.73)
+      tmp1 = 598;
+    else if (FT1 <= 2686.38)
+      tmp1 = 598.1;
+    else if (FT1 <= 2687.03)
+      tmp1 = 598.2;
+    else if (FT1 <= 2687.68)
+      tmp1 = 598.3;
+    else if (FT1 <= 2688.33)
+      tmp1 = 598.4;
+    else if (FT1 <= 2688.98)
+      tmp1 = 598.5;
+    else if (FT1 <= 2689.63)
+      tmp1 = 598.6;
+    else if (FT1 <= 2690.28)
+      tmp1 = 598.7;
+    else if (FT1 <= 2690.93)
+      tmp1 = 598.8;
+    else if (FT1 <= 2691.58)
+      tmp1 = 598.9;
+  } else if (FT1 <= 2698.08) {
+    if (FT1 == 2692.23)
+      tmp1 = 599;
+    else if (FT1 <= 2692.88)
+      tmp1 = 599.1;
+    else if (FT1 <= 2693.53)
+      tmp1 = 599.2;
+    else if (FT1 <= 2694.18)
+      tmp1 = 599.3;
+    else if (FT1 <= 2694.83)
+      tmp1 = 599.4;
+    else if (FT1 <= 2695.48)
+      tmp1 = 599.5;
+    else if (FT1 <= 2696.13)
+      tmp1 = 599.6;
+    else if (FT1 <= 2696.78)
+      tmp1 = 599.7;
+    else if (FT1 <= 2697.43)
+      tmp1 = 599.8;
+    else if (FT1 <= 2698.08)
+      tmp1 = 599.9;
+  }
+  return tmp1;
+}
